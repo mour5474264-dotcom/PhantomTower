@@ -1,0 +1,10 @@
+.workspace-form{background:transparent}.workspace-form .el-select,.workspace-form .el-input,.workspace-form .el-textarea{width:100%}.material-box{background:#fffdf9;border:1px solid #e1ddd2;border-radius:6px;padding:12px;min-height:130px}.material-box>b{display:block;margin-bottom:9px;font-size:12px}.material-box small{display:block;color:#8a9289;margin-top:8px}.thumbs{display:flex;gap:6px;flex-wrap:wrap;margin-top:9px}.thumb{position:relative;width:52px;height:52px}.thumb .el-image{width:52px;height:52px;border-radius:4px}.thumb-delete{position:absolute!important;right:-8px;top:-8px;z-index:2}.custom-size{display:flex;align-items:center;gap:8px;margin:-8px 0 12px}.clear-button{margin-top:4px}.result-card{height:220px;position:relative;border-radius:6px;overflow:hidden;background:#deddd8}.result-card .el-image{width:100%;height:100%;cursor:zoom-in}.result-check{position:absolute;right:9px;top:9px;z-index:2;background:#fff;border-radius:4px;padding:4px}.generation-actions{display:flex;justify-content:flex-end;margin:16px 0}.el-radio-group{display:flex;flex-wrap:wrap;gap:6px}.el-form-item{margin-bottom:15px}
+.preset-preview {
+  max-height: 180px;
+  overflow-y: auto;
+  line-height: 1.7;
+  padding: 12px 14px;
+  border-left: 3px solid var(--el-color-primary);
+  background: #f7f8fa;
+  white-space: pre-wrap;
+}

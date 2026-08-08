@@ -1,0 +1,9 @@
+/* Visual prototype overrides: brighter solid studio palette. */
+body{background:#f1eee7 !important}
+.sidebar{background:#1f3027 !important}
+.panel{background:#fffdf9 !important;border-color:#d8d4c9 !important}
+.primary-btn{background:#b85d3f !important}
+.panel{box-shadow:0 1px 0 rgba(31,43,34,.03)}
+.photo-card:after{background:rgba(38,49,39,.55)}
+.person{background:#9aa994}.outfit{background:#c6a98d}.scene{background:#9bab88}.pose{background:#879992}
+.queue-note{margin:6px 0 0}
