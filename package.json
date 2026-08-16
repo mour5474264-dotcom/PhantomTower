@@ -1,25 +1,32 @@
 {
   "name": "phantom-tower",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
     "dev": "vite",
     "server": "node server/index.js",
     "build": "vite build",
+    "build:server": "vite build --config vite.server.config.js",
     "electron:dev": "npm run build && electron .",
-    "dist:win": "npm run build && electron-builder --win nsis",
-    "dist:mac": "npm run build && electron-builder --mac dmg"
+    "dist:win": "npm run build && npm run build:server && electron-builder --win nsis",
+    "dist:mac": "npm run build && npm run build:server && electron-builder --mac dmg",
+    "license:issue": "node cloudflare-api/scripts/license-manager-tencent.cjs issue",
+    "license:revoke": "node cloudflare-api/scripts/license-manager-tencent.cjs revoke",
+    "license:admin": "node cloudflare-api/scripts/license-admin-tencent.cjs"
   },
   "build": {
     "appId": "com.phantomtower.studio",
-    "productName": "PhantomTower",
+    "productName": "样片工厂",
+    "directories": {
+      "output": "release"
+    },
     "electronDownload": {
       "mirror": "https://npmmirror.com/mirrors/electron/"
     },
     "files": [
-      "dist/**/*",
+      "web-dist/**/*",
       "electron/**/*",
       "server/**/*",
       "package.json"
@@ -28,16 +35,30 @@
       {
         "from": "data",
         "to": "data",
-        "filter": ["**/*"]
+        "filter": [
+          "presets.json",
+          "builtin-presets.json",
+          "prompt-templates.json",
+          "prompt-templates.defaults.json",
+          "builtin-prompt-templates.json",
+          "builtin-prompt-templates.defaults.json"
+        ]
       },
       {
-        "from": "server",
+        "from": "server-dist",
         "to": "server",
-        "filter": ["**/*"]
+        "filter": [
+          "index.js"
+        ]
       }
     ],
     "win": {
       "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "include": "build/installer.nsh"
     }
   },
   "dependencies": {
@@ -52,9 +73,11 @@
     "vue-router": "latest"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "^5.20260815.1",
+    "@vitejs/plugin-vue": "latest",
     "electron": "^43.3.0",
-    "electron-builder": "^26.15.3"
+    "electron-builder": "^26.15.3",
+    "typescript": "^7.0.2",
+    "vite": "latest"
   }
 }
-
-

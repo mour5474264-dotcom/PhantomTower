@@ -1,0 +1,219 @@
+/* Homepage workbench: global navigation stays on top; task setup stays together on the left. */
+.sidebar {
+  height: 64px;
+  padding: 0 28px;
+}
+
+.sidebar nav a {
+  padding: 0 16px;
+  font-size: 12px;
+}
+
+.intro {
+  min-height: 82px;
+  padding: 18px 0 14px;
+  border-bottom: 1px solid #cfd6d1;
+}
+
+.intro h2 {
+  font-size: 20px;
+  margin-bottom: 3px;
+}
+
+.intro-actions .el-button {
+  min-width: 104px;
+}
+
+.v5-home-layout {
+  display: grid !important;
+  grid-template-columns: minmax(350px, 380px) minmax(0, 1fr) !important;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 0 18px;
+  align-items: start;
+  min-height: calc(100vh - 146px);
+  background: transparent;
+}
+
+.v5-home-layout .workspace-form,
+.v5-home-layout .grid {
+  display: contents;
+}
+
+.task-setup {
+  grid-column: 1;
+  grid-row: 1 / 4;
+  display: block !important;
+  position: relative !important;
+  z-index: 1;
+  width: 100%;
+  min-width: 0;
+  align-self: start;
+  height: calc(100vh - 146px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+}
+
+.task-setup > .panel:first-child {
+  grid-column: 1;
+  grid-row: 1;
+  min-height: 0;
+  padding: 20px;
+  border: 1px solid #cfd6d1;
+  border-radius: 6px 6px 0 0;
+  background: #f5f7f4;
+}
+
+.task-setup > .config-panel {
+  display: block !important;
+  position: static !important;
+  inset: auto !important;
+  z-index: auto !important;
+  width: 100% !important;
+  min-width: 0 !important;
+  max-width: none !important;
+  height: auto !important;
+  max-height: none !important;
+  min-height: 0 !important;
+  overflow: visible !important;
+  transform: none !important;
+  visibility: visible !important;
+  transition: none !important;
+  padding: 18px 20px 20px;
+  border: 1px solid #cfd6d1;
+  border-top: 0;
+  border-radius: 0 0 6px 6px;
+  background: #f8f9f6 !important;
+  box-shadow: none !important;
+}
+
+.task-setup > .panel:first-child:after {
+  display: none;
+}
+
+.task-setup > .panel:first-child > .eyebrow,
+.task-setup > .panel:first-child > h3 {
+  visibility: visible;
+  height: auto;
+  margin: 0;
+}
+
+.task-setup > .panel:first-child > h3,
+.v5-home-layout .config-panel h3 {
+  margin-top: 6px;
+  font-size: 15px;
+}
+
+.task-setup > .panel:first-child > .muted {
+  margin: 10px 0 16px;
+}
+
+.v5-home-layout > .queue {
+  grid-column: 2 !important;
+  grid-row: 1 / 4 !important;
+  min-width: 0;
+  min-height: calc(100vh - 146px);
+  margin: 0 !important;
+  padding: 20px;
+  border: 1px solid #303a37;
+  border-radius: 6px;
+  background: #111414;
+}
+
+.v5-home-layout > .queue .gallery {
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+}
+
+.v5-home-layout > .queue .empty {
+  min-height: calc(100vh - 270px);
+}
+
+.config-field-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 14px 0 6px;
+  color: #35433e;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.config-field-head .el-button {
+  height: 25px;
+  padding: 0 2px;
+  color: #258d81;
+  font-size: 11px;
+}
+
+.config-field-head + .el-form-item {
+  margin-bottom: 14px;
+}
+
+.task-action-bar {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  gap: 8px;
+  margin: 16px -20px -20px;
+  padding: 12px 20px;
+  border-top: 1px solid #cfd6d1;
+  background: #f8f9f6;
+}
+
+.task-action-bar .el-button {
+  flex: 1;
+  min-height: 38px;
+}
+
+.task-action-bar .el-button--primary {
+  flex: 1.4;
+}
+
+.task-action-bar .stop-generation-button {
+  flex: 1.4;
+  min-height: 38px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid #f56c6c;
+  border-radius: 4px;
+  background: #f56c6c;
+  color: #fff;
+  cursor: pointer;
+  font: inherit;
+}
+
+.task-action-bar .stop-generation-button:hover {
+  background: #f78989;
+  border-color: #f78989;
+}
+
+.v5-home-layout .config-panel .clear-button {
+  margin-top: 0;
+}
+
+@media (max-width: 980px) {
+  .v5-home-layout {
+    grid-template-columns: minmax(310px, 350px) minmax(0, 1fr) !important;
+    gap: 0 12px;
+  }
+
+  .task-setup > .panel:first-child,
+  .task-setup > .config-panel {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+}
+
+@media (max-width: 760px) {
+  .sidebar { padding: 0 14px; overflow-x: auto; }
+  .sidebar .brand { margin-right: 14px; }
+  .sidebar nav a { padding: 0 10px; white-space: nowrap; }
+  main { padding: 0 14px 28px; }
+  .v5-home-layout { display: block !important; }
+  .task-setup { height: auto; overflow: visible; }
+  .task-setup > .panel:first-child { border-radius: 6px 6px 0 0; }
+  .task-setup > .config-panel { border-radius: 0 0 6px 6px; }
+  .v5-home-layout > .queue { min-height: 460px; margin-top: 14px !important; }
+}

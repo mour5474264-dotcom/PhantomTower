@@ -1,0 +1,19 @@
+{
+  "apis": [
+    {
+      "name": "主力",
+      "endpoint": "https://image.cjyyswq.com",
+      "key": "sk-XfOAUGC1JTXc2SBUUh7u7jkyrui3jBWGtvqTVU2cLy3J4p9M",
+      "model": "",
+      "id": "741f4655-3561-4708-b4c6-56ad6a861af7"
+    },
+    {
+      "name": "toitoi",
+      "endpoint": "https://api-c.reqtoken.com",
+      "key": "sk-9b9462a2af3423fb20907ee697f8681f0f87a02521c8e5cab0a1a77c4603df68",
+      "id": "5695957d-c2c9-4561-87a4-56464f48f098"
+    }
+  ],
+  "activeApiId": "741f4655-3561-4708-b4c6-56ad6a861af7",
+  "adminPassword": "scrypt:3b32308ffffa1d800076ecfe3cfcd83b:e34849e74101ba31d3e55ef0ac8054d5c9bd99434f1ca0a05af716cc69c265fb671d0a6ba8aa55d0e413631f34db1df19f9769b194cfba05ca1847dfd66e9a4f"
+}

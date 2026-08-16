@@ -1,0 +1,13 @@
+name = "phantom-tower-api"
+main = "src/index.ts"
+compatibility_date = "2026-08-15"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "phantom-tower"
+database_id = "4a01814e-0ecc-4529-be1c-605c6da77876"
+
+[vars]
+LICENSE_TOKEN_TTL_SECONDS = "86400"
+
+# Set secrets with: wrangler secret put LICENSE_SIGNING_SECRET

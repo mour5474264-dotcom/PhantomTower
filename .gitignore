@@ -4,8 +4,9 @@ dist/
 .env.*
 *.log
 .idea/
-data/
-
 dist.zip
 electron-runtime.zip
 *.zip
+release/win-unpacked/
+data/license-admin-secret.txt
+data/license-admin-records.json
