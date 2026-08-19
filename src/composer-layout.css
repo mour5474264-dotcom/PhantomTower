@@ -1,0 +1,238 @@
+/* Desktop composition: material thumbnails stay in the left rail, while the prompt is a compact bottom dock. */
+.v5-home-layout {
+  grid-template-columns: 286px minmax(0, 1fr) !important;
+  grid-template-rows: minmax(0, 1fr) auto !important;
+  gap: 8px 12px;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  align-items: stretch;
+}
+
+html, body, #app { height: 100%; }
+body { overflow: hidden; }
+main { height: calc(100% - 64px); min-height: 0; overflow: hidden; padding: 12px 42px 16px !important; }
+.rail-new-task { width: 100%; height: 32px; margin: 0 0 14px; padding: 0 7px; border-color: #cdd8d2; border-radius: 5px; color: #2c5c50; background: #fff; font-size: 11px; }
+.rail-new-task:hover { border-color: #248a7b; color: #146b5e; background: #f1faf7; }
+
+.v5-home-layout .workspace-form,
+.v5-home-layout .grid,
+.v5-home-layout .task-setup {
+  display: contents !important;
+}
+
+.v5-home-layout .task-setup > .panel:first-child {
+  grid-column: 1;
+  grid-row: 1 / 3;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+  border: 1px solid #cfd8d4;
+  border-radius: 8px;
+  padding: 14px 12px 16px;
+  background: #f5f8f6;
+}
+.v5-home-layout .task-setup > .panel:first-child > .eyebrow { color: #268579; font: 9px/1 Consolas, monospace; letter-spacing: 1px; }
+.v5-home-layout .task-setup > .panel:first-child > h3 { margin: 7px 0 10px; color: #263630; font-size: 15px; }
+.v5-home-layout .task-setup > .panel:first-child > .muted { margin: 8px 0 12px; color: #6e7d76; font-size: 10px; line-height: 1.45; }
+.v5-home-layout .mode-toolbar { display: flex; align-items: center; margin: 8px 0 10px; }
+.v5-home-layout .mode-switch { display: grid; grid-template-columns: 1fr 1fr; width: 100%; gap: 0; }
+.v5-home-layout .mode-switch .el-button { width: 100%; height: 30px; margin: 0; border-radius: 0; font-size: 10px; }
+.v5-home-layout .mode-switch .el-button:first-child { border-radius: 5px 0 0 5px; }
+.v5-home-layout .mode-switch .el-button:last-child { border-radius: 0 5px 5px 0; }
+.v5-home-layout .assets { gap: 8px; }
+.v5-home-layout .image-operation-options { gap: 6px; }
+.v5-home-layout .image-operation-options .el-radio-button__inner { min-height: 31px; border-radius: 5px !important; font-size: 10px; }
+
+.v5-home-layout > .queue {
+  grid-column: 2 !important;
+  grid-row: 1 !important;
+  min-width: 0;
+  min-height: 0;
+  height: auto !important;
+  margin: 0 !important;
+  display: flex;
+  flex-direction: column;
+  align-content: start;
+  justify-content: flex-start !important;
+  overflow: hidden;
+  padding: 10px 12px 12px;
+  border: 1px solid #273231;
+  border-radius: 8px;
+  background: #0f1413;
+}
+.v5-home-layout > .queue > .queue-head { order: 0 !important; position: static !important; z-index: 1; flex: 0 0 40px !important; height: 40px !important; min-height: 40px !important; margin: 0 !important; padding: 0 0 6px !important; border-bottom: 1px solid #2a3432; align-items: center; }
+.v5-home-layout > .queue > .queue-head h3 { margin: 3px 0 0; font-size: 14px; }
+.v5-home-layout > .queue > .gallery,
+.v5-home-layout > .queue > .empty { min-height: 0; margin-top: 12px; overflow: auto; scrollbar-width: none; }
+.v5-home-layout > .queue > .gallery,
+.v5-home-layout > .queue > .empty { order: 1 !important; grid-row: auto !important; align-self: stretch; }
+.v5-home-layout > .queue > .gallery { flex: 1 1 auto; margin-top: 6px; align-content: start; }
+.v5-home-layout > .queue > .empty { flex: 1 1 auto; margin-top: 6px; }
+.v5-home-layout > .queue > .gallery::-webkit-scrollbar,
+.v5-home-layout > .queue > .empty::-webkit-scrollbar { width: 0; height: 0; }
+
+.v5-home-layout .composer-panel {
+  grid-column: 2;
+  grid-row: 2;
+  min-width: 0;
+  min-height: 0;
+  position: relative;
+  margin: 0;
+  padding: 8px 14px 9px;
+  border: 1px solid #cfd8d4;
+  border-radius: 8px;
+  background: #f8faf8;
+  box-shadow: 0 -5px 18px rgba(35, 55, 48, .06);
+}
+
+.composer-heading { display: flex; align-items: baseline; gap: 10px; margin-bottom: 6px; }
+.composer-heading .eyebrow { margin: 0; color: #258c80; font: 10px/1 Consolas, monospace; }
+.composer-heading h3 { margin: 0; color: #263530; font-size: 13px; font-weight: 700; }
+
+.quick-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  row-gap: 6px;
+  margin-bottom: 8px;
+}
+.left-quick-controls {
+  grid-template-columns: 1fr 1fr;
+  gap: 7px;
+  margin: 14px 0 16px;
+  padding-top: 12px;
+  border-top: 1px solid #dce4df;
+}
+.left-quick-controls .quick-model { grid-column: 1 / -1; }
+.quick-control { display: flex; align-items: center; min-width: 0; margin: 0 !important; padding: 0 7px 0 10px; border: 1px solid #d2ddd8; border-radius: 15px; background: #fff; }
+.quick-control.quick-model { flex: 0 0 250px; }
+.quick-control.quick-preset { flex: 0 0 250px; }
+.quick-control.quick-quality { flex: 0 0 122px; }
+.quick-control.quick-size { flex: 0 0 166px; }
+.quick-control.quick-count { flex: 0 0 100px; }
+.quick-control.quick-format { flex: 0 0 118px; }
+.quick-control.quick-resolution { flex: 0 0 128px; }
+.quick-refresh { flex: 0 0 28px; width: 28px; height: 28px; margin: 0 !important; padding: 0 !important; border: 1px solid #d2ddd8; border-radius: 50%; color: #2a8578; background: #fff; }
+.quick-refresh:hover { border-color: #208273; color: #126d60; background: #eef8f5; }
+.quick-custom-size { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; height: 30px; }
+.quick-custom-size .el-input-number { width: 82px; }
+.quick-custom-size .el-input-number .el-input__wrapper { min-height: 28px; border: 1px solid #d2ddd8; border-radius: 14px; box-shadow: none; }
+.quick-control .el-form-item__label,
+.composer-prompt .el-form-item__label {
+  height: auto;
+  padding: 0;
+  color: #65756e;
+  font-size: 10px;
+  line-height: 28px;
+  white-space: nowrap;
+}
+.quick-control .el-form-item__content { min-width: 0; flex: 1; margin-left: 5px !important; }
+.quick-control .el-select,
+.quick-control .el-input-number { width: 100%; }
+.quick-control .el-select__selected-item,
+.quick-control .el-select__placeholder { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.quick-control .el-select__wrapper { padding: 0 4px 0 5px; }
+.quick-control .el-select__selected-item { font-size: 12px; }
+.quick-control .el-select__caret { margin-left: 3px; }
+.quick-control .el-select__wrapper,
+.quick-control .el-input-number,
+.quick-control .el-input-number .el-input__wrapper {
+  min-height: 28px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.quick-control .el-input-number .el-input__wrapper { padding: 0 5px; }
+.quick-control .el-input-number .el-input__inner { font-size: 12px; }
+.quick-control .el-select__wrapper.is-focused,
+.quick-control .el-input-number:focus-within,
+.quick-control .el-input-number .el-input__wrapper.is-focus {
+  border-color: #2b9e91;
+  box-shadow: 0 0 0 3px rgba(43, 158, 145, .12);
+}
+.quick-count .el-input-number .el-input__inner { text-align: left; }
+
+.prompt-surface { position: relative; }
+.composer-prompt { margin: 0 !important; }
+.composer-prompt .el-textarea__inner {
+  min-height: 68px !important;
+  padding: 12px 14px 44px;
+  border: 1px solid #9dbbb2;
+  border-radius: 6px;
+  background: #fffefd;
+  color: #25332e;
+  font: 13px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif;
+  box-shadow: none;
+  resize: vertical;
+}
+.composer-prompt .el-textarea__inner:focus { border-color: #1d8274; box-shadow: 0 0 0 3px rgba(29, 130, 116, .12); }
+
+.advanced-settings { margin-top: 8px; border-top: 1px solid #dce4df; }
+.advanced-settings > summary { padding: 7px 0 2px; color: #5b6b65; cursor: pointer; font-size: 11px; list-style: none; }
+.advanced-settings > summary::-webkit-details-marker { display: none; }
+.advanced-settings > summary::before { content: '＋'; display: inline-block; width: 18px; color: #258d81; }
+.advanced-settings[open] > summary::before { content: '−'; }
+.advanced-settings-content { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px 14px; padding: 5px 0 3px; }
+.advanced-settings-content .config-field-head,
+.advanced-settings-content .el-form-item,
+.advanced-settings-content .custom-size,
+.advanced-settings-content .settings-grid { margin: 0 !important; }
+.advanced-settings-content .config-field-head { grid-column: 1 / -1; }
+.advanced-settings-content .settings-grid { display: contents; }
+.advanced-settings-content .settings-grid .el-form-item:last-child { display: none; }
+
+.composer-panel .config-summary { display: none; }
+.composer-panel .task-action-bar {
+  position: absolute;
+  right: 10px;
+  top: auto;
+  bottom: auto;
+  display: flex;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+.composer-panel .task-action-bar .clear-button { display: none; }
+.composer-panel .task-action-bar { right: 10px; bottom: 10px; }
+.composer-panel .task-action-bar .el-button--primary,
+.composer-panel .task-action-bar .stop-generation-button {
+  min-width: 94px;
+  min-height: 32px;
+  height: 32px;
+  border-radius: 5px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0;
+}
+.composer-panel .task-action-bar .el-button--primary {
+  border-color: #126d60;
+  background: #126d60;
+  box-shadow: 0 3px 8px rgba(18, 109, 96, .18);
+}
+.composer-panel .task-action-bar .el-button--primary:hover { border-color: #0e584e; background: #0e584e; }
+.composer-panel .task-action-bar .stop-generation-button { background: #c94235; border-color: #c94235; }
+
+@media (max-width: 920px) {
+  .v5-home-layout { grid-template-columns: 240px minmax(0, 1fr) !important; }
+  .quick-controls { flex-wrap: wrap; }
+  .quick-control.quick-model { width: min(230px, 42%); }
+  .composer-panel .task-action-bar { position: static; margin: 10px 0 0 auto; }
+  .composer-prompt { margin-right: 0 !important; }
+}
+@media (max-width: 700px) {
+  main { height: auto; min-height: calc(100% - 64px); overflow: visible; }
+  .v5-home-layout { display: block !important; height: auto; overflow: visible; }
+  .v5-home-layout .task-setup { display: block !important; }
+  .v5-home-layout .task-setup > .panel:first-child { height: auto; margin-bottom: 12px; }
+  .v5-home-layout > .queue { height: 460px; min-height: 460px; margin-bottom: 12px !important; }
+  .v5-home-layout .composer-panel { position: relative; }
+  .composer-panel .task-action-bar { position: static; margin-top: 10px; }
+  .quick-controls { flex-wrap: wrap; }
+  .composer-prompt { margin-right: 0 !important; }
+}
