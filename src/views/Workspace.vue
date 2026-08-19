@@ -112,14 +112,14 @@ const availableTemplates = computed(() => {
 })
 const preset = computed(() => availableTemplates.value.find((item) => item.id === presetId.value))
 const materialTypes = [
-  {key: 'person', label: '人物参考', step: '主体', hint: '固定人物身份、脸部与服装', limit: 3, required: true},
-  {key: 'reference', label: '目标 / 构图图', step: '任务', hint: '每张图片单独执行一次人物替换', limit: 30},
-  {key: 'prop', label: '道具参考', step: '任务', hint: '每张道具图片单独生成一项', limit: 30}
+  {key: 'person', label: '人物参考', step: '可选', hint: '用于固定人物身份、脸部与服装', limit: 3},
+  {key: 'reference', label: '目标 / 构图图', step: '任务', hint: '每张图片单独执行一次处理，可叠加背景和道具素材', limit: 30},
+  {key: 'prop', label: '道具参考', step: '可选', hint: '用于影响每张目标图中的道具内容', limit: 30}
 ]
-materialTypes.push({key: 'scene', label: '场景参考', step: '任务', hint: '每张场景图片单独生成一项', limit: 30})
+materialTypes.push({key: 'scene', label: '背景参考', step: '可选', hint: '用于影响每张目标图的背景与环境', limit: 30})
 const activeMaterialTypes = computed(() => {
   const keys = {
-    batch: ['person', 'reference'],
+    batch: ['person', 'reference', 'scene', 'prop'],
     fusion: ['person', 'reference', 'scene', 'prop'],
     background: ['reference', 'scene'],
     prop: ['reference', 'prop'],
@@ -252,7 +252,7 @@ function buildImageTasks() {
     return materials.value.reference.map((item, index) => ({
       // The target must be the first physical image: several image models use
       // the first input as the editing canvas despite the textual role labels.
-      item, type: 'reference', label: `逐张处理 ${index + 1}`, materialKeys: ['reference', 'person']
+      item, type: 'reference', label: `逐张处理 ${index + 1}`, materialKeys: ['reference', 'person', 'scene', 'prop']
     }))
   }
   if (!target) return []
@@ -269,7 +269,6 @@ function buildImageTasks() {
 }
 
 function imageValidationError() {
-  if (imageOperation.value === 'batch' && !materials.value.person.length) return '逐张处理需要至少一张人物参考图'
   if (!materials.value.reference.length) return `${operationLabel()}需要一张主目标图`
   if (imageOperation.value === 'background' && !materials.value.scene.length) return '背景替换需要一张背景参考图'
   if (imageOperation.value === 'edit' && !prompt.value.trim()) return '请说明需要修改的局部内容'
@@ -284,8 +283,8 @@ function buildMaterialPrompt(labeled, taskType = 'text', taskLabel = '提示词�
   if (!labeled.length) return '';
   const primary = labeled.find((item) => item.primary)
   const manifest = ['提示词可直接使用“人物参考图”“目标图/构图图”“道具图”“场景参考图”“动作参考图”指代对应类别，无需使用图片序号。', '本次请求会同时发送以上全部参考图；本次主参考图是“' + (primary?.promptLabel || '无') + '”。当规则提到目标图、构图图或主参考图时，均以该图片为准。', ...labeled.map((item, index) => `图片${index + 1}：${item.promptLabel}${item.primary ? '（本次主参考图）' : ''}（${item.role}）`)].join('\n');
-  const rule = configuredRule || (taskType === 'reference'
-      ? '执行人物替换，保持目标图动作、位置、遮挡和透视，人物参考图只提供身份与外观。'
+  const defaultRule = taskType === 'reference'
+      ? '以主目标图为画面基础，保持其构图、动作、位置、遮挡和透视。人物参考图只提供人物身份与外观；如上传背景参考图，则将其环境、场景氛围和背景元素融入主目标图；如上传道具图，则将其作为画面中人物自然使用或呈现的道具。未上传的人物、背景或道具素材不作替换要求。'
       : taskType === 'pose'
           ? '保持人物参考中的同一人物，采用最后一张动作参考的姿势和身体朝向；不得带入动作参考人物的身份、脸部和背景。'
           : taskType === 'prop'
@@ -298,8 +297,13 @@ function buildMaterialPrompt(labeled, taskType = 'text', taskLabel = '提示词�
                           ? `只替换主目标图中的“${replaceObjectText.trim()}”。保持其他主体、位置、比例、透视、接触关系和光线不变，不生成额外道具。`
                           : taskType === 'local-edit'
                               ? '只修改用户指定的局部内容。保持未提及区域的主体、构图、位置、比例、透视、遮挡和光线不变，不重绘整张图片。'
-                              : '只根据补充提示词为人物参考中的同一人物创建一个新变化。');
-  return `【本次只处理一个任务：${taskLabel}】\n${manifest}\n\n${rule}`;
+                              : '只根据补充提示词为人物参考中的同一人物创建一个新变化。';
+  const batchMaterialRule = taskType === 'reference' ? [
+    labeled.some((item) => item.role === 'scene_reference') && '背景参考图是必须使用的视觉来源：将背景图中可辨识的场景、地点、室内外环境、主要背景物体、色调和氛围融入主目标图背景，不得忽略或以无关背景替代。',
+    labeled.some((item) => item.role === 'prop_reference') && '道具图是必须使用的视觉来源：在主目标图中清晰呈现道具图里的主要道具，保留其可辨识的外形、材质、颜色和关键细节，并使其与人物或画面自然接触；不得省略、替换为其他道具或只保留相似概念。'
+  ].filter(Boolean).join('\n') : '';
+  const rule = [configuredRule, defaultRule, batchMaterialRule].filter(Boolean).join('\n\n');
+  return `【本次只处理一个任务：${taskLabel}】\n${manifest}\n\n【执行规则】\n${rule}`;
 }
 
 function buildTasks() {
@@ -637,7 +641,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
                 </el-radio-group>
               </el-form-item>
               <p class="operation-hint">{{
-                  imageOperation === 'batch' ? '每张目标图独立生成，人物参考固定身份，目标图保留构图。' : imageOperation === 'fusion' ? '人物、主目标、背景和道具共同组成一个融合任务。' : imageOperation === 'background' ? '只使用主目标图和背景参考图，保留前景主体。' : imageOperation === 'prop' ? '只使用主目标图和道具参考图，指定画面中要替换的对象。' : '从结果中选择一张样片作为基础图，只描述需要修改的局部内容。'
+                  imageOperation === 'batch' ? '每张目标图独立生成。人物参考固定身份；上传背景和道具图后，会一并影响每张目标图的生成。' : imageOperation === 'fusion' ? '人物、主目标、背景和道具共同组成一个融合任务。' : imageOperation === 'background' ? '只使用主目标图和背景参考图，保留前景主体。' : imageOperation === 'prop' ? '只使用主目标图和道具参考图，指定画面中要替换的对象。' : '从结果中选择一张样片作为基础图，只描述需要修改的局部内容。'
                 }}</p>
               <div v-for="item in activeMaterialTypes" :key="item.key" class="material-box"
                    :class="{ 'is-primary': item.required, 'has-files': materials[item.key].length }">
