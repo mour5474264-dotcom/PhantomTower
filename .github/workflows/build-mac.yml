@@ -39,6 +39,8 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: PhantomTower-macOS
+          # Mac installers are temporary build outputs; avoid exhausting the repository quota.
+          retention-days: 3
           path: |
             release/*.dmg
             release/*-mac.zip
