@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 //#region server/index.js
 var dataDir = process.env.PHANTOMTOWER_DATA_DIR || path.join(path.dirname(fileURLToPath(import.meta.url)), "../data");
 var generatedDir = path.join(dataDir, "generated");
-var exportDir = process.env.PHANTOMTOWER_EXPORT_DIR || path.join(dataDir, "exports");
+var exportDir = process.env.PHANTOMTOWER_EXPORT_DIR || path.join(dataDir, "export");
 var files = {
 	settings: path.join(dataDir, "settings.json"),
 	records: path.join(dataDir, "generation-records.json"),
@@ -19,9 +19,7 @@ var files = {
 	promptTemplateHistory: path.join(dataDir, "prompt-template-history.json"),
 	imageCache: path.join(dataDir, "image-cache.json")
 };
-var pendingImages = /* @__PURE__ */ new Map();
 var activeGenerations = /* @__PURE__ */ new Map();
-var referenceImageModels = /* @__PURE__ */ new Set(["gpt-image-2-1k"]);
 async function read(file, fallback) {
 	try {
 		return JSON.parse(await fs.readFile(file, "utf8"));
@@ -119,26 +117,14 @@ async function json(req) {
 function apiUrl(endpoint, route) {
 	return `${String(endpoint || "").trim().replace(/\/+$/, "")}/v1/${String(route).replace(/^\/+/, "")}`;
 }
-function modelId(model) {
-	return typeof model === "string" ? model : model?.id;
-}
-function supportsReferenceImages(model) {
-	return referenceImageModels.has(modelId(model));
-}
-function filterReferenceImageModels(payload) {
-	const supported = (Array.isArray(payload?.data) ? payload.data : Array.isArray(payload?.models) ? payload.models : []).filter(supportsReferenceImages);
-	return Array.isArray(payload?.data) ? {
-		...payload,
-		data: supported
-	} : {
-		...payload,
-		models: supported
-	};
-}
 function dataUrlFile(dataUrl, filename = "reference.png") {
 	const match = String(dataUrl || "").match(/^data:([^;]+);base64,(.+)$/s);
 	if (!match) throw new Error("invalid reference image data");
 	return new Blob([Buffer.from(match[2], "base64")], { type: match[1] || "image/png" });
+}
+function referenceFilename(dataUrl, index) {
+	const contentType = String(dataUrl || "").match(/^data:([^;]+);base64,/i)?.[1] || "image/png";
+	return `reference-${index + 1}.${imageExtension(contentType)}`;
 }
 function appendGenerationOptions(form, payload, input) {
 	form.append("model", String(payload.model));
@@ -173,6 +159,9 @@ function imageExtension(contentType) {
 	if (/jpe?g/i.test(contentType)) return "jpg";
 	if (/webp/i.test(contentType)) return "webp";
 	return "png";
+}
+function generatedUrl(filename) {
+	return `http://127.0.0.1:4317/api/generated/${encodeURIComponent(filename)}`;
 }
 async function writeGeneratedImage(filename, buffer) {
 	await fs.mkdir(generatedDir, { recursive: true });
@@ -226,13 +215,6 @@ async function cacheImage(url) {
 		file
 	};
 }
-function saveImageInBackground(url) {
-	const current = pendingImages.get(url);
-	if (current) return current;
-	const task = persistImage(url).finally(() => pendingImages.delete(url));
-	pendingImages.set(url, task);
-	return task;
-}
 async function persistImage(url) {
 	if (/^data:image\//i.test(url)) {
 		const match = url.match(/^data:([^;]+);base64,(.+)$/s);
@@ -262,7 +244,7 @@ async function persistImage(url) {
 			file
 		};
 	}
-	return pendingImages.get(url) || cacheImage(url);
+	return cacheImage(url);
 }
 async function getDownloadImage(url) {
 	if (/^data:image\//i.test(url)) {
@@ -271,6 +253,13 @@ async function getDownloadImage(url) {
 		return {
 			buffer: Buffer.from(match[2], "base64"),
 			contentType: match[1]
+		};
+	}
+	if (/^https?:/i.test(url) && !url.startsWith("http://127.0.0.1:4317/api/generated/")) {
+		const local = await cachedImage(url);
+		if (local) return {
+			buffer: await fs.readFile(local.file),
+			contentType: local.contentType
 		};
 	}
 	const local = await persistImage(url);
@@ -290,7 +279,8 @@ http.createServer(async (req, res) => {
 	try {
 		if (req.url === "/api/health" && req.method === "GET") return send(res, 200, {
 			ok: true,
-			dataDir
+			dataDir,
+			exportDir
 		});
 		if (req.url.startsWith("/api/generate/cancel") && req.method === "POST") {
 			const taskId = new URL(req.url, "http://127.0.0.1").searchParams.get("taskId");
@@ -382,7 +372,19 @@ http.createServer(async (req, res) => {
 			return send(res, 200, {
 				ok: true,
 				path: target,
-				filename: safeName
+				filename: safeName,
+				exportDir
+			});
+		}
+		if (req.url === "/api/prepare-edit" && req.method === "POST") {
+			const { url } = await json(req);
+			if (!url || typeof url !== "string") return send(res, 400, { error: "invalid image url" });
+			const image = await persistImage(url);
+			return send(res, 200, {
+				ok: true,
+				url: generatedUrl(image.filename),
+				filename: image.filename,
+				contentType: image.contentType
 			});
 		}
 		if (req.url === "/api/export" && req.method === "POST") {
@@ -403,7 +405,8 @@ http.createServer(async (req, res) => {
 			return send(res, 200, {
 				ok: true,
 				count: saved.length,
-				files: saved
+				files: saved,
+				exportDir
 			});
 		}
 		if (req.url === "/api/models" && req.method === "GET") {
@@ -411,12 +414,12 @@ http.createServer(async (req, res) => {
 			if (!api) return send(res, 400, { error: "请先配置并启用 API" });
 			const response = await fetch(apiUrl(api.endpoint, "models"), { headers: { Authorization: `Bearer ${api.key}` } });
 			const payload = await response.json();
-			return send(res, response.status, response.ok ? filterReferenceImageModels(payload) : payload);
+			return send(res, response.status, payload);
 		}
 		if (req.url === "/api/generate" && req.method === "POST") {
 			const input = await json(req);
-			if (!supportsReferenceImages(input.model)) return send(res, 400, { error: "该模型未通过参考图生成验证，不能在样片工厂中使用。请使用 gpt-image-2-1k。" });
 			const api = await activeApi();
+			const requestedImages = Array.isArray(input.images) ? input.images.filter((image) => typeof image === "string" && image.trim()) : [];
 			const mode = input.mode === "image" ? "image" : "text";
 			const operation = promptTemplateOperation(input.operation, mode);
 			const builtIn = (await read(files.builtInPromptTemplates, [])).find((item) => promptTemplateMatches(item, mode, operation));
@@ -450,21 +453,19 @@ http.createServer(async (req, res) => {
 				if (input.resolution) payload.resolution = input.resolution;
 				if (input.format) payload.output_format = input.format;
 				if (input.mask) payload.mask = input.mask;
-				const referenceImages = Array.isArray(input.images) ? input.images.filter((image) => typeof image === "string" && image.trim()) : [];
-				if (referenceImages.length) payload.images = referenceImages;
+				const referenceImages = requestedImages;
 				if (Array.isArray(input.materials) && input.materials.length) payload.materials = input.materials.map(({ data, ...material }) => material);
-				const isLocalEdit = input.operation === "local-edit";
-				const imagePath = isLocalEdit ? "/images/edits" : "/images/generations";
+				const isReferenceRequest = referenceImages.length > 0;
+				const imagePath = isReferenceRequest ? "/images/edits" : "/images/generations";
 				let body = JSON.stringify(payload);
 				let headers = {
 					"Content-Type": "application/json",
 					Authorization: `Bearer ${api.key}`
 				};
-				if (isLocalEdit) {
-					if (!referenceImages.length) return send(res, 400, { error: "局部编辑缺少基础图" });
+				if (isReferenceRequest) {
 					const form = new FormData();
 					appendGenerationOptions(form, payload, input);
-					form.append("image", dataUrlFile(referenceImages[0]), "reference.png");
+					for (const [imageIndex, image] of referenceImages.entries()) form.append("image[]", dataUrlFile(image), referenceFilename(image, imageIndex));
 					form.append("input_fidelity", "high");
 					body = form;
 					headers = { Authorization: `Bearer ${api.key}` };
@@ -491,16 +492,16 @@ http.createServer(async (req, res) => {
 				images.push(...result.data || []);
 			}
 			if (controller.signal.aborted) return;
-			const persistedImages = images.map((image) => {
+			const persistedImages = await Promise.all(images.map(async (image) => {
 				const source = image?.url || (image?.b64_json ? `data:image/png;base64,${image.b64_json}` : "");
 				if (!source) return image;
-				saveImageInBackground(source).catch((error) => console.error("image cache failed:", error.message));
+				const local = await persistImage(source);
 				return {
 					...image,
-					url: source,
-					sourceUrl: image.url
+					url: generatedUrl(local.filename),
+					sourceUrl: image.url || source
 				};
-			});
+			}));
 			Date.now().toString(), (/* @__PURE__ */ new Date()).toISOString(), input.model, input.extraPrompt, input.taskId || crypto.randomUUID(), input.parentResultId, Math.max(1, Number(input.version || 1)), userTemplate?.id, builtIn.id, input.images?.length, (input.materials || []).map((item, index) => ({
 				index: index + 1,
 				role: item.role || "reference",

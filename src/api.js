@@ -112,6 +112,14 @@ export function downloadUrl(url, filename = 'atelier-image.png') {
     return `${BASE}/api/download?url=${encodeURIComponent(url)}&filename=${encodeURIComponent(filename)}`
 }
 
+export async function prepareEditImage(url) {
+    return request('/api/prepare-edit', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({url})
+    }, '编辑基础图准备失败')
+}
+
 export async function downloadImage(url, filename = 'atelier-image.png') {
     const response = await fetch(`${BASE}/api/save-image`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({url, filename})})
     const data = await response.json().catch(() => ({}))

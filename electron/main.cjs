@@ -172,12 +172,22 @@ app.whenReady().then(async () => {
   const serverCwd = app.isPackaged ? path.dirname(serverEntry) : path.join(__dirname, '..')
   const installDir = app.isPackaged ? path.dirname(process.execPath) : path.join(__dirname, '..')
   const dataDir = path.join(installDir, 'data')
-  const exportPathFile = path.join(installDir, 'export-dir.txt')
-  let exportDir = path.join(dataDir, 'exports')
-  try {
-    const configured = fs.readFileSync(exportPathFile, 'utf8').trim()
-    if (configured) exportDir = configured
-  } catch {}
+  // Older installers wrote this file before electron-builder finalized
+  // $INSTDIR, leaving it one directory above the executable. Read that legacy
+  // location once so existing installations keep their chosen export folder.
+  const exportPathFiles = [path.join(installDir, 'export-dir.txt'), path.join(path.dirname(installDir), 'export-dir.txt')]
+  // Keep the default export location next to the installed application.  Do not
+  // derive it from the server bundle or the process working directory.
+  let exportDir = path.join(dataDir, 'export')
+  for (const exportPathFile of exportPathFiles) {
+    try {
+      const configured = fs.readFileSync(exportPathFile, 'utf8').trim()
+      if (configured) {
+        exportDir = path.isAbsolute(configured) ? configured : path.resolve(installDir, configured)
+        break
+      }
+    } catch {}
+  }
   if (app.isPackaged) {
     syncBundledPresets(dataDir)
     syncBundledPromptTemplates(dataDir)

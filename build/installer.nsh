@@ -18,7 +18,7 @@ Function ExportDirectoryPage
   ${EndIf}
   ${NSD_CreateLabel} 0 0 100% 25u "请选择图片导出文件夹。以后下载和批量导出的图片会自动保存到此处。"
   Pop $0
-  ${NSD_CreateText} 0 32u 76% 12u "$DOCUMENTS\PhantomTower Exports"
+  ${NSD_CreateText} 0 32u 76% 12u "$INSTDIR\data\export"
   Pop $ExportDirectoryInput
   ${NSD_CreateBrowseButton} 78% 32u 22% 12u "浏览..."
   Pop $ExportDirectoryBrowse
@@ -40,9 +40,16 @@ Function ExportDirectoryPageLeave
     MessageBox MB_ICONEXCLAMATION "请选择图片导出文件夹。"
     Abort
   ${EndIf}
+
+  # $INSTDIR is finalized only immediately before the install section. Keep the
+  # selection here, then persist it from customInstall so it is written beside
+  # the actual application executable rather than its parent directory.
+FunctionEnd
+
+!macro customInstall
   CreateDirectory "$ExportDirectory"
   FileOpen $0 "$INSTDIR\export-dir.txt" w
   FileWrite $0 "$ExportDirectory"
   FileClose $0
-FunctionEnd
+!macroend
 !endif

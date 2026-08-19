@@ -161,10 +161,12 @@ app.whenReady().then(async () => {
   const installDir = app.isPackaged ? path.dirname(process.execPath) : path.join(__dirname, '..')
   const dataDir = path.join(installDir, 'data')
   const exportPathFile = path.join(installDir, 'export-dir.txt')
-  let exportDir = path.join(dataDir, 'exports')
+  // Keep the default export location next to the installed application.  Do not
+  // derive it from the server bundle or the process working directory.
+  let exportDir = path.join(dataDir, 'export')
   try {
     const configured = fs.readFileSync(exportPathFile, 'utf8').trim()
-    if (configured) exportDir = configured
+    if (configured) exportDir = path.isAbsolute(configured) ? configured : path.resolve(installDir, configured)
   } catch {}
   if (app.isPackaged) {
     syncBundledPresets(dataDir)

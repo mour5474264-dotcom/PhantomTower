@@ -3,10 +3,13 @@ import {ref, computed, onMounted} from 'vue'
 import {useRouter} from 'vue-router'
 import {Download, Maximize2, X} from 'lucide-vue-next'
 import {getRecords, downloadImage, exportImages, makeImageFilename} from '../api'
+import {ElMessage} from 'element-plus'
 
 const records = ref([]);
 const error = ref('');
 const preview = ref(null)
+const exportingRecord = ref('')
+const savingImage = ref('')
 const router = useRouter()
 const taskGroups = computed(() => {
   const groups = new Map()
@@ -37,11 +40,26 @@ function imageInputStatus(record) {
 }
 
 async function download(url, record, index) {
-  await downloadImage(url, makeImageFilename(index + 1, 'png'))
+  const imageKey = `${record.id}-${index}`
+  if (savingImage.value) return
+  savingImage.value = imageKey
+  try {
+    const saved = await downloadImage(url, makeImageFilename(index + 1, 'png'))
+    ElMessage.success(`已保存到 ${saved.exportDir || saved.path}`)
+  } finally {
+    savingImage.value = ''
+  }
 }
 
 async function downloadAll(record) {
-  await exportImages(images(record))
+  if (exportingRecord.value) return
+  exportingRecord.value = record.id
+  try {
+    const exported = await exportImages(images(record))
+    ElMessage.success(`已导出 ${exported.count} 张图片到 ${exported.exportDir || '本地导出目录'}`)
+  } finally {
+    exportingRecord.value = ''
+  }
 }
 
 function continueEdit(image, record) {
@@ -68,9 +86,9 @@ onMounted(async () => {
       <div v-for="record in group.records" :key="record.id" class="record-card">
       <div class="record-meta">
         <div><b>{{ record.model }}</b><span>{{ new Date(record.createdAt).toLocaleString() }}</span></div>
-        <button class="secondary" @click="downloadAll(record)">
+        <button class="secondary" :disabled="exportingRecord === record.id" @click="downloadAll(record)">
           <Download :size="14"/>
-          导出本次图片
+          {{ exportingRecord === record.id ? '正在导出' : '导出本次图片' }}
         </button>
       </div>
       <p class="record-version">{{ record.request?.operation || 'text' }} · V{{ record.request?.version || 1 }}<span v-if="record.request?.parentResultId"> · 续作：{{ record.request.parentResultId }}</span></p>
@@ -79,13 +97,15 @@ onMounted(async () => {
       <div class="record-images">
         <div v-for="(image,index) in images(record)" :key="image" class="record-image"><img :src="image"
                                                                                             alt="生成结果"/>
-          <button @click="preview=image">
-            <Maximize2 :size="14"/>
-          </button>
-          <button @click="download(image,record,index)">
-            <Download :size="14"/>
-          </button>
-          <button title="继续编辑" @click="continueEdit(image, record)">继续编辑</button>
+          <div class="record-image-actions">
+            <button title="预览" @click="preview=image"><Maximize2 :size="14"/></button>
+            <button :title="savingImage === `${record.id}-${index}` ? '正在保存' : '保存到本地'"
+                    :disabled="Boolean(savingImage)" @click="download(image,record,index)">
+              <Download v-if="savingImage !== `${record.id}-${index}`" :size="14"/>
+              <span v-else class="record-save-pending">保存中</span>
+            </button>
+            <button class="record-continue" @click="continueEdit(image, record)">继续编辑</button>
+          </div>
         </div>
       </div>
       </div>

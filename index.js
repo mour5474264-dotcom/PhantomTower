@@ -6,7 +6,7 @@ import {fileURLToPath} from 'node:url'
 
 const dataDir = process.env.PHANTOMTOWER_DATA_DIR || path.join(path.dirname(fileURLToPath(import.meta.url)), '../data')
 const generatedDir = path.join(dataDir, 'generated')
-const exportDir = process.env.PHANTOMTOWER_EXPORT_DIR || path.join(dataDir, 'exports')
+const exportDir = process.env.PHANTOMTOWER_EXPORT_DIR || path.join(dataDir, 'export')
 const files = {
     settings: path.join(dataDir, 'settings.json'),
     records: path.join(dataDir, 'generation-records.json'),
@@ -147,6 +147,16 @@ async function getDownloadImage(url) {
         if (!match) throw new Error('invalid image data')
         return {buffer: Buffer.from(match[2], 'base64'), contentType: match[1]}
     }
+    // Reuse a locally cached generation before falling back to the network.
+    if (/^https?:/i.test(url) && !url.startsWith('http://127.0.0.1:4317/api/generated/')) {
+        const local = await cachedImage(url)
+        if (local) return {buffer: await fs.readFile(local.file), contentType: local.contentType}
+        const pending = pendingImages.get(url)
+        if (pending) {
+            const entry = await pending
+            return {buffer: await fs.readFile(entry.file), contentType: entry.contentType}
+        }
+    }
     const local = await persistImage(url)
     return {buffer: await fs.readFile(local.file), contentType: local.contentType}
 }
@@ -157,7 +167,7 @@ http.createServer(async (req, res) => {
         return res.end()
     }
     try {
-        if (req.url === '/api/health' && req.method === 'GET') return send(res, 200, {ok: true, dataDir})
+        if (req.url === '/api/health' && req.method === 'GET') return send(res, 200, {ok: true, dataDir, exportDir})
         if (req.url === '/api/settings' && req.method === 'GET') return send(res, 200, await read(files.settings, {
             apis: [],
             activeApiId: ''

@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { RouterLink, RouterView } from 'vue-router'
-import { Images, Library, Settings2, History, Server, ChevronDown } from 'lucide-vue-next'
+import { Images, Settings2, Server } from 'lucide-vue-next'
 
 const apiProfiles = ref(JSON.parse(localStorage.getItem('atelier-apis') || '[]'))
 const activeApiId = ref(localStorage.getItem('atelier-active-api') || '')
@@ -14,6 +14,8 @@ const licenseKey = ref('')
 const activationError = ref('')
 const activating = ref(false)
 const isAuthorized = computed(() => licenseStatus.value.state === 'authorized')
+const isLocalDevelopment = import.meta.env.DEV && ['localhost', '127.0.0.1'].includes(window.location.hostname)
+const desktopLicense = window.phantomTowerLicense
 function friendlyActivationError(error) {
   const message = String(error?.message || error || '')
   if (message.includes('invalid_or_expired_license')) return '许可证无效或已过期，请检查 PT 许可证是否完整。'
@@ -25,6 +27,10 @@ function friendlyActivationError(error) {
 }
 
 async function refreshLicenseStatus() {
+  if (isLocalDevelopment) {
+    licenseStatus.value = { state: 'authorized', message: '本地开发模式' }
+    return
+  }
   try { licenseStatus.value = await window.phantomTowerLicense.getStatus() }
   catch { licenseStatus.value = { state: 'needs_activation', message: '无法读取本机授权状态' } }
 }
@@ -32,8 +38,8 @@ async function activateLicense() {
   activationError.value = ''
   activating.value = true
   try {
-    if (!window.phantomTowerLicense?.activate) throw new Error('授权模块未加载，请使用桌面客户端安装包启动。')
-    licenseStatus.value = await window.phantomTowerLicense.activate(licenseKey.value)
+    if (!desktopLicense?.activate) throw new Error('授权模块未加载，请使用桌面客户端安装包启动。')
+    licenseStatus.value = await desktopLicense.activate(licenseKey.value)
     licenseKey.value = ''
   } catch (error) {
     activationError.value = friendlyActivationError(error)
@@ -43,11 +49,12 @@ async function activateLicense() {
 onMounted(refreshLicenseStatus)
 let licenseCheckTimer
 onMounted(() => {
-  const minutes = Number(window.phantomTowerLicense.checkIntervalMinutes || 5)
+  if (isLocalDevelopment || !desktopLicense?.getStatus) return
+  const minutes = Number(desktopLicense.checkIntervalMinutes || 5)
   licenseCheckTimer = window.setInterval(async () => {
     if (!isAuthorized.value) return
     try {
-      const status = await window.phantomTowerLicense.getStatus()
+      const status = await desktopLicense.getStatus()
       if (status.state !== 'authorized') licenseStatus.value = status
     } catch {
       // Keep the current authorization during transient network failures.
@@ -75,9 +82,7 @@ onUnmounted(() => window.clearInterval(licenseCheckTimer))
     <div class="brand"><span class="mark">S</span><div><b>样片工厂</b><small>Sample Factory</small></div></div>
     <nav aria-label="功能导航">
       <RouterLink to="/"><Images :size="17" />创作工作台</RouterLink>
-      <RouterLink to="/library"><Library :size="17" />素材库</RouterLink>
       <RouterLink to="/presets"><Settings2 :size="17" />提示词预设</RouterLink>
-      <RouterLink to="/history"><History :size="17" />生成记录</RouterLink>
       <RouterLink to="/apis"><Server :size="17" />API 管理</RouterLink>
     </nav>
     <div class="sidebar-meta"><span class="status-light"></span><div><b>LOCAL STUDIO</b><small>Desktop workspace</small></div></div>

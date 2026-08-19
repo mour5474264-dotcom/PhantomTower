@@ -6,7 +6,7 @@ import {fileURLToPath} from 'node:url'
 
 const dataDir = process.env.PHANTOMTOWER_DATA_DIR || path.join(path.dirname(fileURLToPath(import.meta.url)), '../data')
 const generatedDir = path.join(dataDir, 'generated')
-const exportDir = process.env.PHANTOMTOWER_EXPORT_DIR || path.join(dataDir, 'exports')
+const exportDir = process.env.PHANTOMTOWER_EXPORT_DIR || path.join(dataDir, 'export')
 const files = {
     settings: path.join(dataDir, 'settings.json'),
     records: path.join(dataDir, 'generation-records.json'),
@@ -19,11 +19,7 @@ const files = {
     promptTemplateHistory: path.join(dataDir, 'prompt-template-history.json'),
     imageCache: path.join(dataDir, 'image-cache.json')
 }
-const pendingImages = new Map()
 const activeGenerations = new Map()
-// `/v1/models` does not expose reference-image capabilities. Only expose models
-// proven to consume reference images through the configured gateway.
-const referenceImageModels = new Set(['gpt-image-2-1k'])
 
 async function read(file, fallback) {
     try {
@@ -105,16 +101,6 @@ function apiUrl(endpoint, route) {
 
 function modelId(model) {
     return typeof model === 'string' ? model : model?.id
-}
-
-function supportsReferenceImages(model) {
-    return referenceImageModels.has(modelId(model))
-}
-
-function filterReferenceImageModels(payload) {
-    const models = Array.isArray(payload?.data) ? payload.data : Array.isArray(payload?.models) ? payload.models : []
-    const supported = models.filter(supportsReferenceImages)
-    return Array.isArray(payload?.data) ? {...payload, data: supported} : {...payload, models: supported}
 }
 
 function dataUrlFile(dataUrl, filename = 'reference.png') {
@@ -218,14 +204,6 @@ async function cacheImage(url) {
     return {...entry, file}
 }
 
-function saveImageInBackground(url) {
-    const current = pendingImages.get(url)
-    if (current) return current
-    const task = persistImage(url).finally(() => pendingImages.delete(url))
-    pendingImages.set(url, task)
-    return task
-}
-
 async function persistImage(url) {
     if (/^data:image\//i.test(url)) {
         const match = url.match(/^data:([^;]+);base64,(.+)$/s)
@@ -247,7 +225,7 @@ async function persistImage(url) {
         await fs.access(file)
         return {filename, contentType: filename.endsWith('.jpg') || filename.endsWith('.jpeg') ? 'image/jpeg' : filename.endsWith('.webp') ? 'image/webp' : 'image/png', file}
     }
-    return pendingImages.get(url) || cacheImage(url)
+    return cacheImage(url)
 }
 
 async function getDownloadImage(url) {
@@ -255,6 +233,12 @@ async function getDownloadImage(url) {
         const match = url.match(/^data:([^;]+);base64,(.+)$/s)
         if (!match) throw new Error('invalid image data')
         return {buffer: Buffer.from(match[2], 'base64'), contentType: match[1]}
+    }
+    // Generation stores remote results in the local cache. Reuse that file for
+    // exports/downloads so an already available image does not hit the network.
+    if (/^https?:/i.test(url) && !url.startsWith('http://127.0.0.1:4317/api/generated/')) {
+        const local = await cachedImage(url)
+        if (local) return {buffer: await fs.readFile(local.file), contentType: local.contentType}
     }
     const local = await persistImage(url)
     return {buffer: await fs.readFile(local.file), contentType: local.contentType}
@@ -266,7 +250,7 @@ http.createServer(async (req, res) => {
         return res.end()
     }
     try {
-        if (req.url === '/api/health' && req.method === 'GET') return send(res, 200, {ok: true, dataDir})
+        if (req.url === '/api/health' && req.method === 'GET') return send(res, 200, {ok: true, dataDir, exportDir})
         if (req.url.startsWith('/api/generate/cancel') && req.method === 'POST') {
             const taskId = new URL(req.url, 'http://127.0.0.1').searchParams.get('taskId')
             const controller = taskId && activeGenerations.get(taskId)
@@ -358,7 +342,18 @@ http.createServer(async (req, res) => {
             await fs.mkdir(exportDir, {recursive: true})
             const target = path.join(exportDir, safeName)
             await fs.writeFile(target, image.buffer)
-            return send(res, 200, {ok: true, path: target, filename: safeName})
+            return send(res, 200, {ok: true, path: target, filename: safeName, exportDir})
+        }
+        if (req.url === '/api/prepare-edit' && req.method === 'POST') {
+            const {url} = await json(req)
+            if (!url || typeof url !== 'string') return send(res, 400, {error: 'invalid image url'})
+            const image = await persistImage(url)
+            return send(res, 200, {
+                ok: true,
+                url: generatedUrl(image.filename),
+                filename: image.filename,
+                contentType: image.contentType
+            })
         }
         if (req.url === '/api/export' && req.method === 'POST') {
             const {urls = [], extension = 'png'} = await json(req)
@@ -372,21 +367,19 @@ http.createServer(async (req, res) => {
                 await fs.writeFile(target, image.buffer)
                 return {filename, path: target}
             }))
-            return send(res, 200, {ok: true, count: saved.length, files: saved})
+            return send(res, 200, {ok: true, count: saved.length, files: saved, exportDir})
         }
         if (req.url === '/api/models' && req.method === 'GET') {
             const api = await activeApi();
             if (!api) return send(res, 400, {error: '请先配置并启用 API'});
             const response = await fetch(apiUrl(api.endpoint, 'models'), {headers: {Authorization: `Bearer ${api.key}`}});
             const payload = await response.json()
-            return send(res, response.status, response.ok ? filterReferenceImageModels(payload) : payload)
+            return send(res, response.status, payload)
         }
         if (req.url === '/api/generate' && req.method === 'POST') {
             const input = await json(req);
-            if (!supportsReferenceImages(input.model)) {
-                return send(res, 400, {error: '该模型未通过参考图生成验证，不能在样片工厂中使用。请使用 gpt-image-2-1k。'})
-            }
             const api = await activeApi();
+            const requestedImages = Array.isArray(input.images) ? input.images.filter((image) => typeof image === 'string' && image.trim()) : []
             const mode = input.mode === 'image' ? 'image' : 'text'
             // UI task types describe the image role, while templates are keyed by
             // the user-facing operation. Normalize them before resolving presets.
@@ -417,28 +410,20 @@ http.createServer(async (req, res) => {
                 if (input.resolution) payload.resolution = input.resolution
                 if (input.format) payload.output_format = input.format
                 if (input.mask) payload.mask = input.mask
-                const referenceImages = Array.isArray(input.images)
-                    ? input.images.filter((image) => typeof image === 'string' && image.trim())
-                    : []
-                // This gateway accepts data-URL reference images in its JSON `images`
-                // field. Multipart `images` requests are accepted but silently treated
-                // as text-only generations, leaving image_tokens at zero.
-                if (referenceImages.length) payload.images = referenceImages
+                const referenceImages = requestedImages
                 if (Array.isArray(input.materials) && input.materials.length) {
                     payload.materials = input.materials.map(({data, ...material}) => material)
                 }
-                const isLocalEdit = input.operation === 'local-edit'
-                const imagePath = isLocalEdit ? '/images/edits' : '/images/generations'
+                const isReferenceRequest = referenceImages.length > 0
+                const imagePath = isReferenceRequest ? '/images/edits' : '/images/generations'
                 let body = JSON.stringify(payload)
                 let headers = {'Content-Type': 'application/json', Authorization: `Bearer ${api.key}`}
-                if (isLocalEdit) {
-                    if (!referenceImages.length) return send(res, 400, {error: '局部编辑缺少基础图'})
-                    // gpt-image-compatible edit APIs only ingest input images from
-                    // multipart file fields. JSON data URLs are accepted by some
-                    // gateways but treated as text, which produces image_tokens: 0.
+                if (isReferenceRequest) {
                     const form = new FormData()
                     appendGenerationOptions(form, payload, input)
-                    form.append('image', dataUrlFile(referenceImages[0]), 'reference.png')
+                    for (const [imageIndex, image] of referenceImages.entries()) {
+                        form.append('image[]', dataUrlFile(image), referenceFilename(image, imageIndex))
+                    }
                     form.append('input_fidelity', 'high')
                     body = form
                     headers = {Authorization: `Bearer ${api.key}`}
@@ -465,13 +450,15 @@ http.createServer(async (req, res) => {
                 images.push(...(result.data || []))
             }
             if (controller.signal.aborted) return
-            const persistedImages = images.map((image) => {
+            // Do not return a provider URL until its result has been written locally.
+            // The client remains in its progress state during this operation, and every
+            // result, preview, and later export can use the local generated-file route.
+            const persistedImages = await Promise.all(images.map(async (image) => {
                 const source = image?.url || (image?.b64_json ? `data:image/png;base64,${image.b64_json}` : '')
                 if (!source) return image
-                // Cache each remote result once. Export and continue-edit reuse this task or the cached file.
-                saveImageInBackground(source).catch((error) => console.error('image cache failed:', error.message))
-                return {...image, url: source, sourceUrl: image.url}
-            })
+                const local = await persistImage(source)
+                return {...image, url: generatedUrl(local.filename), sourceUrl: image.url || source}
+            }))
             const record = {
                 id: Date.now().toString(),
                 createdAt: new Date().toISOString(),

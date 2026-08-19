@@ -74,7 +74,6 @@
 .thumb-delete{right:2px;top:2px;width:16px;height:16px;border-radius:3px}
 .material-footer{display:flex;justify-content:space-between;gap:8px;margin-top:8px;color:#7a8882;font-size:8px;line-height:1.2}
 .material-footer span:first-child{color:#52736b}
-.material-box.has-files .material-upload{display:none}
 .material-box.has-files > p{margin-bottom:0}
 .material-box.has-files .material-footer{padding-top:1px}
 .material-box.has-files .material-count{color:#238b7f}
