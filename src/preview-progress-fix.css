@@ -37,15 +37,8 @@
   font: 10px Consolas, monospace;
 }
 
-.result-card .loading-placeholder i {
-  width: min(140px, 70%);
-  height: 4px;
-  margin: 5px 0;
-  background: linear-gradient(90deg, #28302f, #55d8d0, #28302f);
-  background-size: 200% 100%;
-}
-
-.result-card .result-error {
+.result-card .result-error,
+.result-card .result-stopped {
   height: 100%;
   display: flex;
   flex-direction: column;
@@ -58,9 +51,14 @@
   background: #252b2d;
 }
 
-.result-card .result-error strong {
+.result-card .result-error strong,
+.result-card .result-stopped strong {
   color: #ff8e78;
   font: 600 12px Consolas, monospace;
+}
+
+.result-card .result-stopped strong {
+  color: #9fb0ac;
 }
 
 .result-card .result-error span {

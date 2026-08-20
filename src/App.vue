@@ -1,13 +1,48 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { RouterLink, RouterView } from 'vue-router'
-import { Images, Settings2, Server } from 'lucide-vue-next'
+import { Images, Settings2, Server, History, ChevronDown } from 'lucide-vue-next'
+import { getSettings, saveSettings, notifyActiveApiChanged } from './api'
 
 const apiProfiles = ref(JSON.parse(localStorage.getItem('atelier-apis') || '[]'))
 const activeApiId = ref(localStorage.getItem('atelier-active-api') || '')
 const showApiMenu = ref(false)
+const apiSwitching = ref(false)
+const apiSwitchError = ref('')
 const activeApi = computed(() => apiProfiles.value.find((item) => item.id === activeApiId.value))
-function selectApi(id) { activeApiId.value = id; localStorage.setItem('atelier-active-api', id); showApiMenu.value = false }
+
+async function refreshApiProfiles() {
+  try {
+    const settings = await getSettings()
+    apiProfiles.value = settings.apis || []
+    activeApiId.value = settings.activeApiId || ''
+    localStorage.setItem('atelier-apis', JSON.stringify(apiProfiles.value))
+    notifyActiveApiChanged(activeApiId.value)
+  } catch (error) {
+    apiSwitchError.value = error.message || '工作台配置读取失败'
+  }
+}
+
+async function selectApi(id) {
+  if (!id || id === activeApiId.value || apiSwitching.value) {
+    showApiMenu.value = false
+    return
+  }
+  const previous = activeApiId.value
+  activeApiId.value = id
+  apiSwitching.value = true
+  apiSwitchError.value = ''
+  try {
+    await saveSettings({apis: apiProfiles.value, activeApiId: id})
+    notifyActiveApiChanged(id)
+    showApiMenu.value = false
+  } catch (error) {
+    activeApiId.value = previous
+    apiSwitchError.value = error.message || '工作台切换失败'
+  } finally {
+    apiSwitching.value = false
+  }
+}
 
 const licenseStatus = ref({ state: 'checking', message: '正在检查授权...' })
 const licenseKey = ref('')
@@ -46,7 +81,7 @@ async function activateLicense() {
   } finally { activating.value = false }
 }
 
-onMounted(refreshLicenseStatus)
+onMounted(() => { refreshLicenseStatus(); refreshApiProfiles() })
 let licenseCheckTimer
 onMounted(() => {
   if (isLocalDevelopment || !desktopLicense?.getStatus) return
@@ -61,7 +96,11 @@ onMounted(() => {
     }
   }, Math.max(1, minutes) * 60 * 1000)
 })
-onUnmounted(() => window.clearInterval(licenseCheckTimer))
+onMounted(() => window.addEventListener('sample-factory-settings-changed', refreshApiProfiles))
+onUnmounted(() => {
+  window.clearInterval(licenseCheckTimer)
+  window.removeEventListener('sample-factory-settings-changed', refreshApiProfiles)
+})
 </script>
 
 <template>
@@ -83,9 +122,22 @@ onUnmounted(() => window.clearInterval(licenseCheckTimer))
     <nav aria-label="功能导航">
       <RouterLink to="/"><Images :size="17" />创作工作台</RouterLink>
       <RouterLink to="/presets"><Settings2 :size="17" />提示词预设</RouterLink>
+      <RouterLink to="/history"><History :size="17" />生成记录</RouterLink>
       <RouterLink to="/apis"><Server :size="17" />API 管理</RouterLink>
     </nav>
-    <div class="sidebar-meta"><span class="status-light"></span><div><b>LOCAL STUDIO</b><small>Desktop workspace</small></div></div>
+    <div class="sidebar-meta api-switcher">
+      <button type="button" class="api-switcher-button" :disabled="apiSwitching" @click="showApiMenu = !showApiMenu">
+        <span class="status-light"></span>
+        <div><b>{{ activeApi?.name || '未选择工作台' }}</b><small>{{ apiSwitching ? '正在切换工作台...' : (apiSwitchError || 'Desktop workspace') }}</small></div>
+        <ChevronDown :size="14" />
+      </button>
+      <div v-if="showApiMenu" class="api-switcher-menu">
+        <button v-for="item in apiProfiles" :key="item.id" type="button" :class="{ active: item.id === activeApiId }" @click="selectApi(item.id)">
+          <b>{{ item.name }}</b><small>{{ item.endpoint }}</small>
+        </button>
+        <RouterLink to="/apis" @click="showApiMenu = false">管理工作台配置</RouterLink>
+      </div>
+    </div>
   </header>
   <main v-if="isAuthorized">
     <RouterView v-slot="{ Component }">

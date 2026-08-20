@@ -2,7 +2,7 @@
 import {ref} from 'vue'
 import {ElMessage} from 'element-plus'
 import {Plus, Trash2, CheckCircle2, Wifi, Edit3} from 'lucide-vue-next'
-import {getSettings, saveSettings, getModels} from '../api'
+import {getSettings, saveSettings, getModels, notifyActiveApiChanged} from '../api'
 
 const profiles = ref([])
 const activeId = ref('')
@@ -15,6 +15,9 @@ const form = ref(blank())
 
 async function persist() {
   await saveSettings({apis: profiles.value, activeApiId: activeId.value})
+  localStorage.setItem('atelier-apis', JSON.stringify(profiles.value))
+  notifyActiveApiChanged(activeId.value)
+  window.dispatchEvent(new CustomEvent('sample-factory-settings-changed'))
 }
 
 function openCreate() {

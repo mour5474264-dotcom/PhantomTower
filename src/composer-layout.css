@@ -220,6 +220,11 @@ main { height: calc(100% - 64px); min-height: 0; overflow: hidden; padding: 12px
 }
 .composer-panel .task-action-bar .el-button--primary:hover { border-color: #0e584e; background: #0e584e; }
 .composer-panel .task-action-bar .stop-generation-button { background: #c94235; border-color: #c94235; }
+.composer-panel .task-action-bar .stop-generation-button svg {
+  flex: 0 0 auto;
+  animation: none !important;
+  transform: none !important;
+}
 
 @media (max-width: 920px) {
   .v5-home-layout { grid-template-columns: 240px minmax(0, 1fr) !important; }

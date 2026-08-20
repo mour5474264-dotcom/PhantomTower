@@ -1,9 +1,10 @@
 <script setup>
-import {ref, computed, onMounted, onBeforeUnmount, markRaw} from 'vue'
-import {Delete, Upload, Refresh, VideoPlay, VideoPause, Download} from '@element-plus/icons-vue'
+import {ref, computed, onMounted, onBeforeUnmount, markRaw, watch} from 'vue'
+import {Delete, Upload, Refresh, VideoPlay, Download, SwitchButton} from '@element-plus/icons-vue'
 import {ElMessage} from 'element-plus'
 import {X, Plus, ImagePlus, PenLine} from 'lucide-vue-next'
 import {
+  getSettings,
   getModels,
   getPromptTemplates,
   getBuiltInPromptTemplates,
@@ -21,6 +22,10 @@ const URL = {
 const models = ref([]);
 const presets = ref([]);
 const builtInTemplates = ref([]);
+const configLoading = ref(false)
+const modelLoadError = ref('')
+const templateLoadError = ref('')
+const activeWorkspaceName = ref('')
 const model = ref('');
 const modelMode = ref('balanced');
 const presetId = ref('');
@@ -35,9 +40,8 @@ const running = ref(false);
 const completedCount = ref(0);
 const generationTotal = ref(0);
 const error = ref('');
-const controller = ref(null);
-const activeTaskId = ref('')
-const generationQueue = []
+const generationControllers = new Map()
+const activeGenerationWorks = new Set()
 const queuedCount = ref(0)
 const preview = ref('')
 const materials = ref({person: [], pose: [], prop: [], scene: [], reference: []})
@@ -46,6 +50,67 @@ const isTextMode = computed(() => mode.value === 'text')
 const imageOperation = ref('batch')
 const replaceObject = ref('')
 const editParent = ref(null)
+const HOME_MEMORY_DB = 'sample-factory-home-memory'
+const HOME_MEMORY_STORE = 'workspace'
+const HOME_MEMORY_KEY = 'home'
+const HOME_MEMORY_VERSION = 1
+let restoringHomeMemory = true
+let persistHomeMemoryTimer = 0
+let configRequestId = 0
+
+function openHomeMemoryDb() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(HOME_MEMORY_DB, 1)
+    request.onupgradeneeded = () => {
+      request.result.createObjectStore(HOME_MEMORY_STORE)
+    }
+    request.onsuccess = () => resolve(request.result)
+    request.onerror = () => reject(request.error)
+  })
+}
+
+async function readHomeMemory() {
+  const db = await openHomeMemoryDb()
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(HOME_MEMORY_STORE, 'readonly')
+    const request = transaction.objectStore(HOME_MEMORY_STORE).get(HOME_MEMORY_KEY)
+    request.onsuccess = () => resolve(request.result || null)
+    request.onerror = () => reject(request.error)
+    transaction.oncomplete = () => db.close()
+  })
+}
+
+async function writeHomeMemory(value) {
+  const db = await openHomeMemoryDb()
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(HOME_MEMORY_STORE, 'readwrite')
+    transaction.objectStore(HOME_MEMORY_STORE).put(value, HOME_MEMORY_KEY)
+    transaction.oncomplete = () => {
+      db.close()
+      resolve()
+    }
+    transaction.onerror = () => {
+      db.close()
+      reject(transaction.error)
+    }
+  })
+}
+
+async function clearHomeMemory() {
+  const db = await openHomeMemoryDb()
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction(HOME_MEMORY_STORE, 'readwrite')
+    transaction.objectStore(HOME_MEMORY_STORE).delete(HOME_MEMORY_KEY)
+    transaction.oncomplete = () => {
+      db.close()
+      resolve()
+    }
+    transaction.onerror = () => {
+      db.close()
+      reject(transaction.error)
+    }
+  })
+}
 
 function fileToDataUrl(file) {
   return new Promise((resolve, reject) => {
@@ -80,6 +145,11 @@ const selected = ref(new Set())
 const exporting = ref(false)
 const preparingEdit = ref(false)
 const allResultsSelected = computed(() => results.value.length > 0 && selected.value.size === results.value.length)
+const selectedLoadingCount = computed(() => [...selected.value].filter((index) => results.value[index]?.loading).length)
+const selectedRemovableCount = computed(() => [...selected.value].filter((index) => {
+  const item = results.value[index]
+  return item && (!running.value || !item.loading)
+}).length)
 
 const materialPreviewUrls = computed(() => Object.fromEntries(
     Object.entries(materials.value).map(([key, items]) => [key, items.map((item) => item.previewUrl || '')])
@@ -111,11 +181,25 @@ const availableTemplates = computed(() => {
   return all.filter((item) => (item.mode === 'all' || item.mode === (isTextMode.value ? 'text' : 'image')) && (!item.operation || item.operation === 'all' || item.operation === operation))
 })
 const preset = computed(() => availableTemplates.value.find((item) => item.id === presetId.value))
+const configStatusTitle = computed(() => {
+  if (configLoading.value) return activeWorkspaceName.value ? `正在加载 ${activeWorkspaceName.value} 的模型与提示词预设...` : '正在加载当前工作台的模型与提示词预设...'
+  if (modelLoadError.value || templateLoadError.value) return [modelLoadError.value, templateLoadError.value].filter(Boolean).join('；')
+  if (!models.value.length) return '当前工作台暂无可用模型，请手动刷新或前往 API 管理检查配置。'
+  if (!availableTemplates.value.length) return '当前模式暂无可用提示词预设，可手动选择其他模式或到提示词预设中配置。'
+  return ''
+})
+const configStatusType = computed(() => configLoading.value ? 'info' : 'warning')
 const materialTypes = [
   {key: 'person', label: '人物参考', step: '可选', hint: '用于固定人物身份、脸部与服装', limit: 3},
   {key: 'reference', label: '目标 / 构图图', step: '任务', hint: '每张图片单独执行一次处理，可叠加背景和道具素材', limit: 30},
   {key: 'prop', label: '道具参考', step: '可选', hint: '用于影响每张目标图中的道具内容', limit: 30}
 ]
+
+function normalizeConfigSelection() {
+  if (models.value.length && !models.value.some((item) => item.id === model.value)) model.value = models.value[0]?.id || ''
+  if (!models.value.length) model.value = ''
+  if (!availableTemplates.value.some((item) => item.id === presetId.value)) presetId.value = ''
+}
 materialTypes.push({key: 'scene', label: '背景参考', step: '可选', hint: '用于影响每张目标图的背景与环境', limit: 30})
 const activeMaterialTypes = computed(() => {
   const keys = {
@@ -130,6 +214,117 @@ const activeMaterialTypes = computed(() => {
 
 function rawFile(value) {
   return value?.raw instanceof File ? value.raw : value instanceof File ? value : value?.file instanceof File ? value.file : null
+}
+
+function materialMemoryItem(item) {
+  const file = rawFile(item)
+  if (!file) return null
+  return {
+    file,
+    name: item.name || file.name,
+    size: item.size || file.size,
+    type: file.type,
+    lastModified: file.lastModified
+  }
+}
+
+function restoreMaterialItem(item) {
+  const file = item?.file instanceof File ? item.file : null
+  if (!file) return null
+  return markRaw({
+    file,
+    name: item.name || file.name,
+    size: item.size || file.size,
+    previewUrl: URL.createObjectURL(file)
+  })
+}
+
+function resultMemoryItem(item) {
+  return {
+    id: item.id,
+    loading: false,
+    status: item.loading ? 'stopped' : item.status,
+    error: item.error || '',
+    url: item.url || '',
+    label: item.label || '样片',
+    taskId: item.taskId || null,
+    parentResultId: item.parentResultId || null,
+    version: item.version || 1,
+    requestSnapshot: item.requestSnapshot || null
+  }
+}
+
+function restoreResultItem(item) {
+  return {
+    ...item,
+    loading: false,
+    imageLoading: Boolean(item?.url),
+    task: item?.requestSnapshot ? {label: item.label || '样片', type: item.requestSnapshot.operation || item.requestSnapshot.mode || 'text'} : null
+  }
+}
+
+function makeHomeMemorySnapshot() {
+  return {
+    version: HOME_MEMORY_VERSION,
+    savedAt: new Date().toISOString(),
+    form: {
+      model: model.value,
+      modelMode: modelMode.value,
+      presetId: presetId.value,
+      prompt: prompt.value,
+      count: count.value,
+      resolution: resolution.value,
+      format: format.value,
+      size: size.value,
+      customWidth: customWidth.value,
+      customHeight: customHeight.value,
+      mode: mode.value,
+      imageOperation: imageOperation.value,
+      replaceObject: replaceObject.value,
+      editParent: editParent.value
+    },
+    materials: Object.fromEntries(
+      Object.entries(materials.value).map(([key, items]) => [key, items.map(materialMemoryItem).filter(Boolean)])
+    ),
+    results: results.value.map(resultMemoryItem)
+  }
+}
+
+async function restoreHomeMemory() {
+  try {
+    const saved = await readHomeMemory()
+    if (!saved || saved.version !== HOME_MEMORY_VERSION) return
+    const form = saved.form || {}
+    model.value = form.model || model.value
+    modelMode.value = form.modelMode || modelMode.value
+    presetId.value = form.presetId || ''
+    prompt.value = form.prompt || ''
+    count.value = Number(form.count || 1)
+    resolution.value = form.resolution || resolution.value
+    format.value = form.format || format.value
+    size.value = form.size || size.value
+    customWidth.value = Number(form.customWidth || customWidth.value)
+    customHeight.value = Number(form.customHeight || customHeight.value)
+    mode.value = form.mode || mode.value
+    imageOperation.value = form.imageOperation || imageOperation.value
+    replaceObject.value = form.replaceObject || ''
+    editParent.value = form.editParent || null
+    Object.keys(materials.value).forEach((key) => {
+      materials.value[key] = (saved.materials?.[key] || []).map(restoreMaterialItem).filter(Boolean)
+    })
+    results.value = (saved.results || []).map(restoreResultItem)
+    selected.value = new Set()
+  } catch (exception) {
+    console.warn('home memory restore failed', exception)
+  }
+}
+
+function scheduleHomeMemoryPersist() {
+  if (restoringHomeMemory) return
+  window.clearTimeout(persistHomeMemoryTimer)
+  persistHomeMemoryTimer = window.setTimeout(() => {
+    writeHomeMemory(makeHomeMemorySnapshot()).catch((exception) => console.warn('home memory save failed', exception))
+  }, 250)
 }
 
 function referenceRole(key) {
@@ -183,27 +378,53 @@ function removeFile(key, index) {
   materials.value[key].splice(index, 1)
 }
 
-async function refresh() {
-  try {
-    models.value = await getModels();
-    model.value ||= models.value[0]?.id || '';
-  } catch (e) {
-    error.value = e.message
+async function refresh(options = {}) {
+  const requestId = ++configRequestId
+  configLoading.value = true
+  modelLoadError.value = ''
+  templateLoadError.value = ''
+  if (options.clearCurrent !== false) {
+    models.value = []
+    model.value = ''
+    presets.value = []
+    builtInTemplates.value = []
+    presetId.value = ''
   }
   try {
-    presets.value = await getPromptTemplates();
-    builtInTemplates.value = await getBuiltInPromptTemplates();
-    presetId.value = availableTemplates.value.some((item) => item.id === presetId.value) ? presetId.value : ''
-  } catch (e) {
-    error.value = e.message
+    const settings = await getSettings().catch(() => null)
+    if (requestId !== configRequestId) return
+    const activeApi = settings?.apis?.find((item) => item.id === settings.activeApiId)
+    activeWorkspaceName.value = activeApi?.name || ''
+    const [modelsResult, userTemplatesResult, builtInTemplatesResult] = await Promise.allSettled([
+      getModels(),
+      getPromptTemplates(),
+      getBuiltInPromptTemplates()
+    ])
+    if (requestId !== configRequestId) return
+    if (modelsResult.status === 'fulfilled') {
+      models.value = modelsResult.value || []
+      const preferredModel = activeApi?.model && models.value.some((item) => item.id === activeApi.model) ? activeApi.model : ''
+      model.value = preferredModel || (models.value.some((item) => item.id === model.value) ? model.value : models.value[0]?.id || '')
+      if (!models.value.length) modelLoadError.value = '当前工作台没有返回模型列表'
+    } else {
+      modelLoadError.value = modelsResult.reason?.message || '模型配置加载失败'
+    }
+    if (userTemplatesResult.status === 'fulfilled') presets.value = userTemplatesResult.value || []
+    else templateLoadError.value = userTemplatesResult.reason?.message || '提示词预设加载失败'
+    if (builtInTemplatesResult.status === 'fulfilled') builtInTemplates.value = builtInTemplatesResult.value || []
+    else templateLoadError.value = [templateLoadError.value, builtInTemplatesResult.reason?.message || '内置提示词预设加载失败'].filter(Boolean).join('；')
+    normalizeConfigSelection()
+  } finally {
+    if (requestId === configRequestId) configLoading.value = false
   }
 }
 
-function clearCurrent() {
-  controller.value?.abort()
-  controller.value = null
+async function startNewTask() {
+  activeGenerationWorks.forEach((work) => work.controller?.abort())
+  generationControllers.forEach((controller) => controller.abort())
+  generationControllers.clear()
+  activeGenerationWorks.clear()
   running.value = false
-  activeTaskId.value = ''
   Object.keys(materials.value).forEach((key) => {
     materials.value[key] = []
   });
@@ -217,6 +438,22 @@ function clearCurrent() {
   error.value = '';
   completedCount.value = 0;
   generationTotal.value = 0;
+  queuedCount.value = 0;
+  await clearHomeMemory().catch((exception) => console.warn('home memory clear failed', exception))
+}
+
+function clearCurrent() {
+  Object.keys(materials.value).forEach((key) => {
+    materials.value[key] = []
+  });
+  selected.value = new Set();
+  prompt.value = '';
+  replaceObject.value = '';
+  editParent.value = null;
+  presetId.value = '';
+  count.value = 1;
+  error.value = '';
+  completedCount.value = 0;
 }
 
 function setMode(nextMode) {
@@ -347,12 +584,16 @@ function createGenerationWork() {
   const jobs = tasks.flatMap((task) =>
       Array.from({length: count.value}, (_, copyIndex) => ({task, copyIndex}))
   );
-  generationTotal.value = jobs.length
+  if (!running.value) {
+    completedCount.value = 0
+    generationTotal.value = 0
+  }
+  generationTotal.value += jobs.length
   const resultStart = results.value.length
   results.value.push(...jobs.map(({task}, index) => ({
     id: `result-${Date.now()}-${resultStart + index}`,
     loading: true,
-    status: index === 0 ? 'generating' : 'waiting',
+    status: 'generating',
     label: task.label,
     task
   })));
@@ -360,31 +601,41 @@ function createGenerationWork() {
 }
 
 async function runGeneration(work) {
-  completedCount.value = 0;
-  generationTotal.value = work.jobs.length
-  controller.value = new AbortController();
+  const workController = new AbortController()
+  work.controller = workController
+  activeGenerationWorks.add(work)
+  running.value = true
   try {
-    let jobIndex = 0;
-    for (const task of work.tasks) {
-      const labeled = await buildLabeledReferences(task, work.materialSnapshot)
-      const selectedTemplate = availableTemplates.value.find((item) => item.id === work.requestConfig.presetId)
-      const materialPrompt = buildMaterialPrompt(labeled, task.type, task.label, work.requestConfig.replaceObject, selectedTemplate?.systemPrompt || '');
-      const requestSize = await getRequestSize(task, work.requestConfig);
+    const selectedTemplate = availableTemplates.value.find((item) => item.id === work.requestConfig.presetId)
+    const preparedTasks = await Promise.all(work.tasks.map(async (task) => ({
+      task,
+      labeled: await buildLabeledReferences(task, work.materialSnapshot),
+      requestSize: await getRequestSize(task, work.requestConfig)
+    })))
+    if (workController.signal.aborted) throw new DOMException('Aborted', 'AbortError')
+    const preparedByTask = new Map(preparedTasks.map((item) => [item.task, item]))
+
+    const jobs = work.jobs.map(async ({task}, jobIndex) => {
+      const prepared = preparedByTask.get(task)
+      const {labeled} = prepared
+      const resultIndex = work.resultStart + jobIndex
+      const resultId = results.value[resultIndex]?.id
+      const currentResultIndex = () => results.value.findIndex((item) => item?.id === resultId)
       const taskId = crypto.randomUUID()
-      for (let index = 0; index < work.copies; index += 1) {
-        if (controller.value.signal.aborted) throw new DOMException('Aborted', 'AbortError');
-        const resultIndex = work.resultStart + jobIndex
-        results.value[resultIndex] = {...results.value[resultIndex], status: 'generating'};
-        const requestSnapshot = {
+      const controller = new AbortController()
+      generationControllers.set(taskId, controller)
+      const abortHandler = () => controller.abort()
+      workController.signal.addEventListener('abort', abortHandler, {once: true})
+      const requestSnapshot = {
           model: work.requestConfig.model,
-          prompt: materialPrompt,
+          prompt: buildMaterialPrompt(labeled, task.type, task.label, work.requestConfig.replaceObject, selectedTemplate?.systemPrompt || ''),
           extraPrompt: work.requestConfig.prompt,
           presetId: work.requestConfig.presetId,
           mode: work.requestConfig.mode,
           images: labeled.map((item) => item.data),
           materials: labeled,
           n: 1,
-          size: requestSize,
+          size: prepared.requestSize,
           quality: work.requestConfig.quality,
           format: work.requestConfig.format,
           resolution: work.requestConfig.resolution,
@@ -393,72 +644,102 @@ async function runGeneration(work) {
           parentResultId: task.type === 'local-edit' ? editParent.value?.id || null : null,
           version: task.type === 'local-edit' ? Number(editParent.value?.version || 0) + 1 : 1,
           operation: task.type
-        }
-        activeTaskId.value = taskId
-        const response = await generateImage(requestSnapshot, {signal: controller.value.signal});
+      }
+      const startedIndex = currentResultIndex()
+      if (startedIndex >= 0) results.value[startedIndex] = {
+        ...results.value[startedIndex],
+        status: 'generating',
+        taskId,
+        requestSnapshot
+      }
+      try {
+        const response = await generateImage(requestSnapshot, {signal: controller.signal});
         const output = response.data?.[0];
-        results.value[resultIndex] = {
-          id: results.value[resultIndex]?.id || `result-${Date.now()}-${resultIndex}`,
+        const finishedIndex = currentResultIndex()
+        if (finishedIndex >= 0) results.value[finishedIndex] = {
+          id: results.value[finishedIndex]?.id || `result-${Date.now()}-${resultIndex}`,
           loading: false,
           imageLoading: Boolean(output?.url),
           url: output?.url || (output?.b64_json ? `data:image/png;base64,${output.b64_json}` : ''),
           label: task.label,
           task,
-          id: output?.id || results.value[resultIndex]?.id,
+          id: output?.id || results.value[finishedIndex]?.id,
           taskId: output?.taskId || taskId,
           parentResultId: output?.parentResultId || null,
           version: output?.version || 1,
           requestSnapshot
         };
+      } catch (e) {
+        if (e.name !== 'AbortError' && !controller.signal.aborted && !workController.signal.aborted) {
+          error.value = e.message || '生成失败'
+          const failedIndex = currentResultIndex()
+          if (failedIndex >= 0) results.value[failedIndex] = {...results.value[failedIndex], loading: false, status: 'failed', error: e.message || '生成失败'}
+        }
+      } finally {
         completedCount.value += 1
-        jobIndex += 1;
-        if (results.value[work.resultStart + jobIndex]) results.value[work.resultStart + jobIndex] = {...results.value[work.resultStart + jobIndex], status: 'generating'};
+        generationControllers.delete(taskId)
+        workController.signal.removeEventListener('abort', abortHandler)
       }
-    }
+    })
+    await Promise.all(jobs)
   } catch (e) {
     if (e.name !== 'AbortError') error.value = e.message;
     results.value.slice(work.resultStart, work.resultStart + work.jobs.length).forEach((item, offset) => {
       if (item?.loading) results.value[work.resultStart + offset] = {...item, loading: false, status: 'failed', error: e.message || '生成失败'}
     })
   } finally {
-    controller.value = null
-    activeTaskId.value = ''
+    work.controller = null
+    activeGenerationWorks.delete(work)
+    if (!activeGenerationWorks.size) {
+      running.value = false
+      queuedCount.value = 0
+    }
   }
 }
 
 async function generate() {
   const work = createGenerationWork()
   if (!work) return
-  generationQueue.push(work)
-  queuedCount.value = generationQueue.length
-  if (running.value) return
-
   running.value = true
-  while (generationQueue.length && running.value) {
-    const nextWork = generationQueue.shift()
-    queuedCount.value = generationQueue.length
-    await runGeneration(nextWork)
-  }
-  running.value = false
+  queuedCount.value = 0
+  void runGeneration(work)
 }
 
 async function stop() {
-  const taskId = activeTaskId.value
-  if (taskId) {
-    try {
-      await cancelGeneration(taskId)
-    } catch {
-      // Browser cancellation below remains available if the local server is unavailable.
-    }
-  }
-  controller.value?.abort();
-  generationQueue.splice(0)
+  const taskIds = [...generationControllers.keys()]
+  activeGenerationWorks.forEach((work) => work.controller?.abort())
+  generationControllers.forEach((controller) => controller.abort())
+  generationControllers.clear()
+  activeGenerationWorks.clear()
   queuedCount.value = 0
   running.value = false;
   results.value = results.value.map((item) => item.loading
-    ? {...item, loading: false, status: 'stopped', error: '已停止生成'}
+    ? {...item, loading: false, status: 'stopped', error: ''}
     : item)
-  error.value = '已停止生成'
+  error.value = ''
+  void Promise.all(taskIds.map((taskId) => cancelGeneration(taskId).catch(() => null)))
+}
+
+async function stopOne(index) {
+  const item = results.value[index]
+  const taskId = item?.taskId || item?.requestSnapshot?.taskId
+  if (!item?.loading || !taskId) return
+  generationControllers.get(taskId)?.abort()
+  generationControllers.delete(taskId)
+  results.value[index] = {
+    ...item,
+    loading: false,
+    status: 'stopped',
+    error: ''
+  }
+  void cancelGeneration(taskId).catch(() => null)
+}
+
+async function stopSelected() {
+  const loadingIndexes = [...selected.value].filter((index) => results.value[index]?.loading)
+  if (!loadingIndexes.length) return
+  await Promise.all(loadingIndexes.map((index) => stopOne(index)))
+  selected.value = new Set()
 }
 
 function toggle(index) {
@@ -477,8 +758,13 @@ function toggleSelectAll() {
 }
 
 function removeSelected() {
-  if (!selected.value.size || running.value) return
-  const selectedIndexes = selected.value
+  if (!selectedRemovableCount.value) return
+  // Keep in-flight cards in place while generation is active. Jobs address
+  // their original slots, so removing them here would shift later updates.
+  const selectedIndexes = new Set([...selected.value].filter((index) => {
+    const item = results.value[index]
+    return item && (!running.value || !item.loading)
+  }))
   results.value = results.value.filter((_, index) => !selectedIndexes.has(index))
   selected.value = new Set()
 }
@@ -555,25 +841,47 @@ function resultPreviewIndex(index) {
 
 async function retry(index) {
   const item = results.value[index];
-  if (!item?.requestSnapshot || running.value) return
+  if (!item?.requestSnapshot || item.loading) return
   if (selected.value.has(index)) toggle(index)
-  results.value[index] = {...item, loading: true}
+  const taskId = crypto.randomUUID()
+  const controller = new AbortController()
+  const requestSnapshot = {...item.requestSnapshot, taskId}
+  generationControllers.set(taskId, controller)
+  results.value[index] = {
+    ...item,
+    loading: true,
+    status: 'generating',
+    error: '',
+    task: item.task || {type: requestSnapshot.operation || requestSnapshot.mode || 'text', label: item.label || '样片'},
+    taskId,
+    requestSnapshot
+  }
   try {
-    const response = await generateImage(item.requestSnapshot)
+    const response = await generateImage(requestSnapshot, {signal: controller.signal})
     const output = response.data?.[0];
     results.value[index] = {
       ...item,
       loading: false,
+      status: output?.url || output?.b64_json ? 'completed' : 'failed',
+      error: output?.url || output?.b64_json ? '' : '接口没有返回可预览的图片',
       imageLoading: Boolean(output?.url),
       url: output?.url || (output?.b64_json ? `data:image/png;base64,${output.b64_json}` : ''),
       id: output?.id || item.id,
-      taskId: output?.taskId || item.taskId,
+      taskId: output?.taskId || taskId,
       parentResultId: output?.parentResultId || null,
       version: output?.version || 1,
-      requestSnapshot: item.requestSnapshot
+      requestSnapshot,
+      task: item.task || {type: requestSnapshot.operation || requestSnapshot.mode || 'text', label: item.label || '样片'}
     }
   } catch (e) {
-    results.value[index] = {...item, loading: false, error: e.message}
+    if (e.name === 'AbortError') {
+      results.value[index] = {...results.value[index], loading: false, status: 'stopped', error: ''}
+    } else {
+      results.value[index] = {...results.value[index], loading: false, status: 'failed', error: e.message || '生成失败'}
+      error.value = e.message || '生成失败'
+    }
+  } finally {
+    generationControllers.delete(taskId)
   }
 }
 
@@ -594,8 +902,15 @@ async function exportSelected() {
 
 onMounted(async () => {
   await refresh();
+  await restoreHomeMemory()
+  normalizeConfigSelection()
+  restoringHomeMemory = false
   await restoreHistoryEdit()
 })
+
+function onActiveApiChanged() {
+  void refresh()
+}
 
 function onKeydown(event) {
   const tag = event.target?.tagName?.toLowerCase();
@@ -607,7 +922,31 @@ function onKeydown(event) {
 }
 
 onMounted(() => window.addEventListener('keydown', onKeydown))
-onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
+onMounted(() => window.addEventListener('sample-factory-active-api-changed', onActiveApiChanged))
+watch([
+  model,
+  modelMode,
+  presetId,
+  prompt,
+  count,
+  resolution,
+  format,
+  size,
+  customWidth,
+  customHeight,
+  mode,
+  imageOperation,
+  replaceObject,
+  editParent,
+  materials,
+  results
+], scheduleHomeMemoryPersist, {deep: true})
+onBeforeUnmount(() => {
+  window.removeEventListener('keydown', onKeydown)
+  window.removeEventListener('sample-factory-active-api-changed', onActiveApiChanged)
+  window.clearTimeout(persistHomeMemoryTimer)
+  if (!restoringHomeMemory) writeHomeMemory(makeHomeMemorySnapshot()).catch(() => null)
+})
 </script>
 
 <template>
@@ -616,8 +955,8 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
       <div class="grid">
         <aside class="task-setup" aria-label="本次生成任务">
           <section class="panel">
-            <el-button class="rail-new-task" :icon="Plus" @click="clearCurrent">新建任务</el-button>
-            <span class="eyebrow">01 / 生成模式</span>
+            <el-button class="rail-new-task" :icon="Plus" @click="startNewTask">新建任务</el-button>
+
             <h3>{{ isTextMode ? '文字生图' : '图生图' }}</h3>
             <div class="mode-toolbar">
               <div class="mode-switch" role="group" aria-label="生成模式">
@@ -683,27 +1022,29 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
                 <el-input v-model="replaceObject" placeholder="例如：桌上的花瓶"/>
               </el-form-item>
             </div>
-            <div v-else class="text-mode-empty">选择右侧模板、模型和规格后，填写图像描述即可开始生成。</div>
           </section>
           <section class="panel config-panel composer-panel">
             <div class="composer-heading">
               <h3>提示词</h3>
             </div>
+            <el-alert v-if="configStatusTitle" :title="configStatusTitle" :type="configStatusType" :closable="false" show-icon/>
             <div class="quick-controls" aria-label="常用生成设置">
               <el-form-item class="quick-control quick-model" label="模型">
-                <el-select v-model="model" class="studio-select" filterable placeholder="选择模型" popper-class="studio-select-popper" clearable>
+                <el-select v-model="model" class="studio-select" filterable allow-create default-first-option :placeholder="configLoading ? '正在加载模型...' : '选择模型，可直接输入模型 ID'" popper-class="studio-select-popper" clearable :loading="configLoading">
                   <el-option v-for="(item, index) in models" :key="item.id" :label="item.id" :value="item.id">
                     <div class="select-option"><span class="select-index">{{ String(index + 1).padStart(2, '0') }}</span><span><b>{{ item.id }}</b><small>{{ index === 0 ? '主力生成模型' : '备用生成模型' }}</small></span></div>
                   </el-option>
                 </el-select>
+                <small v-if="modelLoadError" class="config-inline-note">{{ modelLoadError }}，仍可手动刷新或重新选择。</small>
               </el-form-item>
               <el-button class="quick-refresh" text :icon="Refresh" title="刷新模型" aria-label="刷新模型" @click="refresh" :disabled="running"/>
               <el-form-item class="quick-control quick-preset" label="预设">
-                <el-select v-model="presetId" class="studio-select" filterable placeholder="未选择预设" popper-class="studio-select-popper">
+                <el-select v-model="presetId" class="studio-select" filterable :placeholder="configLoading ? '正在加载预设...' : '未选择预设'" popper-class="studio-select-popper" :loading="configLoading" clearable>
                   <el-option v-for="(item, index) in availableTemplates" :key="item.id" :label="item.name" :value="item.id">
                     <div class="select-option"><span class="select-index">{{ String(index + 1).padStart(2, '0') }}</span><span><b>{{ item.name }}</b></span></div>
                   </el-option>
                 </el-select>
+                <small v-if="templateLoadError" class="config-inline-note">{{ templateLoadError }}，可继续手动选择已有预设。</small>
               </el-form-item>
               <el-form-item class="quick-control quick-size" label="尺寸">
                 <el-select v-model="size" class="studio-select" popper-class="studio-select-popper">
@@ -727,7 +1068,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
               <div class="task-action-bar">
                 <el-button class="clear-button" @click="clearCurrent">清空当前</el-button>
                 <el-button type="primary" :icon="VideoPlay" @click="generate">{{ running ? '追加生成' : '开始生成' }}</el-button>
-                <button v-if="running" type="button" class="stop-generation-button" @click="stop"><el-icon><VideoPause/></el-icon>停止生成</button>
+                <button v-if="running" type="button" class="stop-generation-button" @click="stop"><el-icon><SwitchButton/></el-icon>停止生成</button>
               </div>
             </div>
             <section class="config-summary" aria-live="polite">
@@ -743,7 +1084,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
     </el-form>
     <section class="panel queue">
       <div class="queue-head">
-        <div><span class="eyebrow">03 / 结果画廊</span>
+        <div>
           <h3>样片预览</h3></div>
         <div v-if="running || completedCount" class="generation-status"><span>{{
             running ? (queuedCount ? `正在生成，后面还有 ${queuedCount} 组等待处理` : '正在调用接口生成') : '生成完成'
@@ -752,12 +1093,14 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
         </div>
         <div class="queue-actions">
           <el-button :disabled="!results.length || running" @click="toggleSelectAll">
-            {{ allResultsSelected ? '取消全选' : '全选' }} ({{ results.length }})
+            {{ allResultsSelected ? '取消全选' : '全选' }}
           </el-button>
-          <el-button :icon="Delete" type="danger" plain :disabled="!selected.size || running"
-                     @click="removeSelected">删除已选 ({{ selected.size }})</el-button>
+          <el-button :icon="Delete" plain :disabled="!selectedRemovableCount"
+                     @click="removeSelected">删除已选 </el-button>
+          <el-button :icon="SwitchButton" plain :disabled="!selectedLoadingCount || !running"
+                     @click="stopSelected">停止已选 </el-button>
           <el-button :icon="Download" :loading="exporting" :disabled="!selected.size || exporting || preparingEdit"
-                     @click="exportSelected">导出已选 ({{ selected.size }})</el-button>
+                     @click="exportSelected">导出已选 </el-button>
           <el-button :icon="PenLine" :loading="preparingEdit" :disabled="selected.size !== 1 || running || preparingEdit"
                      @click="continueEdit">{{ preparingEdit ? '准备编辑图' : '继续编辑' }}</el-button>
         </div>
@@ -770,8 +1113,12 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown))
           <div v-if="item.loading" class="loading-placeholder">
             <span>{{ item.status === 'generating' ? '正在加载图片...' : '等待生成' }}</span>
             <b>样片 {{ index + 1 }}</b>
-            <i v-if="item.status === 'generating'"/>
             <small>{{ completedCount }} / {{ progressTotal }}</small>
+            <el-button v-if="item.taskId" size="small" :icon="SwitchButton" @click="stopOne(index)">停止</el-button>
+          </div>
+          <div v-else-if="item.status === 'stopped'" class="result-stopped">
+            <strong>已停止生成</strong>
+            <el-button v-if="item.task || item.requestSnapshot" size="small" :icon="Refresh" @click="retry(index)">重试</el-button>
           </div>
           <div v-else-if="item.error" class="result-error">
             <strong>生成失败</strong>

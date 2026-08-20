@@ -4,7 +4,8 @@ async function request(path, options, fallback) {
     let response
     try {
         response = await fetch(`${BASE}${path}`, options)
-    } catch {
+    } catch (error) {
+        if (error?.name === 'AbortError') throw error
         throw new Error('本地数据服务未连接，请关闭程序后重新打开')
     }
     const data = await response.json().catch(() => ({}))
@@ -22,6 +23,11 @@ export async function saveSettings(settings) {
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(settings)
     }, 'API 配置保存失败')
+}
+
+export function notifyActiveApiChanged(activeApiId = '') {
+    localStorage.setItem('atelier-active-api', activeApiId)
+    window.dispatchEvent(new CustomEvent('sample-factory-active-api-changed', {detail: {activeApiId}}))
 }
 
 export async function getModels() {

@@ -189,6 +189,12 @@
   border-color: #f78989;
 }
 
+.task-action-bar .stop-generation-button svg {
+  flex: 0 0 auto;
+  animation: none !important;
+  transform: none !important;
+}
+
 .v5-home-layout .config-panel .clear-button {
   margin-top: 0;
 }
