@@ -10,7 +10,7 @@ const dialog = ref(false)
 const editingId = ref('')
 const status = ref('')
 const testing = ref(false)
-const blank = () => ({name: '', endpoint: '', key: ''})
+const blank = () => ({name: '', endpoint: '', key: '', provider: ''})
 const form = ref(blank())
 
 async function persist() {
@@ -135,6 +135,13 @@ getSettings().then((data) => {
         </el-form-item>
         <el-form-item label="API Key">
           <el-input v-model="form.key" type="password" show-password placeholder="请输入对应网址的apiKey"/>
+        </el-form-item>
+        <el-form-item label="协议（可选）">
+          <el-select v-model="form.provider" clearable placeholder="自动识别" style="width: 100%">
+            <el-option label="自动识别" value=""/>
+            <el-option label="OpenAI 兼容协议" value="openai"/>
+            <el-option label="Google Gemini 原生协议" value="gemini"/>
+          </el-select>
         </el-form-item>
       </el-form>
       <template #footer>

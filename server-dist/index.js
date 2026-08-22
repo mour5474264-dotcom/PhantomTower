@@ -20,6 +20,10 @@ var files = {
 	imageCache: path.join(dataDir, "image-cache.json")
 };
 var activeGenerations = /* @__PURE__ */ new Map();
+var recordsWriteQueue = Promise.resolve();
+function wait(ms) {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
 async function read(file, fallback) {
 	try {
 		return JSON.parse(await fs.readFile(file, "utf8"));
@@ -28,10 +32,25 @@ async function read(file, fallback) {
 	}
 }
 async function write(file, data) {
-	await fs.mkdir(dataDir, { recursive: true });
+	await fs.mkdir(path.dirname(file), { recursive: true });
 	const temporary = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
-	await fs.writeFile(temporary, JSON.stringify(data, null, 2), "utf8");
-	await fs.rename(temporary, file);
+	try {
+		await fs.writeFile(temporary, JSON.stringify(data, null, 2), "utf8");
+		for (let attempt = 0; attempt < 6; attempt += 1) try {
+			await fs.rename(temporary, file);
+			return;
+		} catch (error) {
+			if (![
+				"EPERM",
+				"EACCES",
+				"EBUSY"
+			].includes(error.code) || attempt === 5) throw error;
+			await wait(40 * (attempt + 1));
+		}
+	} catch (error) {
+		await fs.rm(temporary, { force: true }).catch(() => null);
+		throw error;
+	}
 }
 function normalizePromptTemplate(template, previous = {}) {
 	const now = (/* @__PURE__ */ new Date()).toISOString();
@@ -54,6 +73,7 @@ function normalizePromptTemplate(template, previous = {}) {
 			"all",
 			"text",
 			"batch",
+			"three-view",
 			"fusion",
 			"background",
 			"prop",
@@ -125,6 +145,70 @@ function dataUrlFile(dataUrl, filename = "reference.png") {
 function referenceFilename(dataUrl, index) {
 	const contentType = String(dataUrl || "").match(/^data:([^;]+);base64,/i)?.[1] || "image/png";
 	return `reference-${index + 1}.${imageExtension(contentType)}`;
+}
+async function upstreamJson(response, context = "上游 API") {
+	const text = await response.text();
+	try {
+		return text ? JSON.parse(text) : {};
+	} catch {
+		if (response.status === 524) throw new Error(`${context}响应超时（HTTP 524）。上游中转站未能在规定时间内完成图片生成，请稍后重试；如果持续出现，请确认该平台支持 Gemini 图生图和多张参考图。`);
+		if (response.status === 502 || response.status === 503 || response.status === 504) throw new Error(`${context}暂时不可用（HTTP ${response.status}）。请稍后重试，或检查中转站服务状态。`);
+		if (response.status === 401 || response.status === 403) throw new Error(`${context}鉴权失败（HTTP ${response.status}）。请检查 API Key 和账号权限。`);
+		if (response.status === 404) throw new Error(`${context}地址不存在（HTTP 404）。请检查 API 地址和协议配置。`);
+		throw new Error(`${context}返回了无法识别的响应（HTTP ${response.status}）。请检查 API 地址、协议和模型是否匹配。`);
+	}
+}
+function apiProvider(api, model = "") {
+	const explicit = String(api?.provider || "").trim().toLowerCase();
+	if (explicit) return explicit;
+	const endpoint = String(api?.endpoint || "").toLowerCase();
+	if (endpoint.includes("generativelanguage.googleapis.com") || endpoint.includes("aiplatform.googleapis.com")) return "gemini";
+	return "openai";
+}
+function geminiUrl(api, model) {
+	return `${String(api.endpoint || "").trim().replace(/\/+$/, "").replace(/\/v1beta$|\/v1$|\/v1alpha$/i, "")}/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(api.key)}`;
+}
+function dataUrlParts(value) {
+	const match = String(value || "").match(/^data:([^;]+);base64,(.+)$/s);
+	return match ? {
+		mimeType: match[1],
+		data: match[2]
+	} : null;
+}
+function geminiPayload(input, prompt, images) {
+	const parts = [{ text: prompt }];
+	for (const image of images) {
+		const inline = dataUrlParts(image);
+		if (inline) parts.push({ inlineData: inline });
+	}
+	return {
+		contents: [{
+			role: "user",
+			parts
+		}],
+		generationConfig: { responseModalities: ["IMAGE"] }
+	};
+}
+function geminiImages(result) {
+	return (result?.candidates?.flatMap((candidate) => candidate?.content?.parts || []) || []).filter((part) => part?.inlineData?.data).map((part) => ({
+		b64_json: part.inlineData.data,
+		mime_type: part.inlineData.mimeType || "image/png"
+	}));
+}
+function friendlyProviderError(result, status, referenceRequest = false) {
+	const raw = typeof result === "string" ? result : result?.error?.message || result?.error || result?.message || "";
+	const text = String(raw);
+	if (/images api.*not supported|image api.*not supported|not supported.*images api/i.test(text)) return referenceRequest ? "当前中转站不支持图片编辑/图生图接口，请确认该平台提供图生图能力，或更换支持参考图的模型。" : "当前中转站不支持图片生成接口，请更换支持图片生成的模型或 API。";
+	if (/invalid.*key|api.?key|unauthorized|forbidden/i.test(text) && (status === 401 || status === 403)) return "API Key 无效或没有权限，请检查密钥和账号套餐。";
+	return text || `图片接口调用失败（HTTP ${status}）。请检查 API 地址、协议和模型配置。`;
+}
+function appendGenerationRecord(record) {
+	recordsWriteQueue = recordsWriteQueue.catch(() => null).then(async () => {
+		const records = await read(files.records, []);
+		records.unshift(record);
+		await write(files.records, records.slice(0, 500));
+	});
+	return recordsWriteQueue;
 }
 function appendGenerationOptions(form, payload, input) {
 	form.append("model", String(payload.model));
@@ -330,7 +414,10 @@ http.createServer(async (req, res) => {
 			...item,
 			version: 0
 		})), files.builtInPromptTemplates));
-		if (req.url === "/api/records" && req.method === "GET") return send(res, 200, []);
+		if (req.url === "/api/records" && req.method === "GET") {
+			const records = await read(files.records, []);
+			return send(res, 200, Array.isArray(records) ? records : []);
+		}
 		if (req.url.startsWith("/api/generated/") && req.method === "GET") {
 			const name = decodeURIComponent(req.url.slice(15)).replace(/[^a-zA-Z0-9._-]/g, "");
 			if (!name || name.includes("..")) return send(res, 400, { error: "invalid generated file" });
@@ -412,8 +499,12 @@ http.createServer(async (req, res) => {
 		if (req.url === "/api/models" && req.method === "GET") {
 			const api = await activeApi();
 			if (!api) return send(res, 400, { error: "请先配置并启用 API" });
-			const response = await fetch(apiUrl(api.endpoint, "models"), { headers: { Authorization: `Bearer ${api.key}` } });
-			const payload = await response.json();
+			const response = apiProvider(api) === "gemini" ? await fetch(`${String(api.endpoint).replace(/\/+$/, "").replace(/\/v1beta$|\/v1$|\/v1alpha$/i, "")}/v1beta/models?key=${encodeURIComponent(api.key)}`) : await fetch(apiUrl(api.endpoint, "models"), { headers: { Authorization: `Bearer ${api.key}` } });
+			const payload = await upstreamJson(response, "模型接口");
+			if (apiProvider(api) === "gemini" && response.ok) return send(res, 200, { data: (payload.models || []).filter((item) => (item.supportedGenerationMethods || []).includes("generateContent")).map((item) => ({
+				id: String(item.name || "").replace(/^models\//, ""),
+				name: item.displayName || item.name
+			})) });
 			return send(res, response.status, payload);
 		}
 		if (req.url === "/api/generate" && req.method === "POST") {
@@ -442,6 +533,7 @@ http.createServer(async (req, res) => {
 			const responses = [];
 			for (let index = 0; index < Math.max(1, Number(input.n || 1)); index += 1) {
 				if (controller.signal.aborted) break;
+				const provider = apiProvider(api, input.model);
 				const payload = {
 					model: input.model,
 					prompt: finalPrompt,
@@ -470,11 +562,17 @@ http.createServer(async (req, res) => {
 					body = form;
 					headers = { Authorization: `Bearer ${api.key}` };
 				}
+				if (provider === "gemini") {
+					if (isReferenceRequest) body = JSON.stringify(geminiPayload(input, finalPrompt, referenceImages));
+					else body = JSON.stringify(geminiPayload(input, finalPrompt, []));
+					headers = { "Content-Type": "application/json" };
+				}
 				const activeTaskId = String(input.taskId || crypto.randomUUID());
 				activeGenerations.set(activeTaskId, controller);
 				let response;
+				let responseProvider = provider;
 				try {
-					response = await fetch(apiUrl(api.endpoint, imagePath), {
+					response = await fetch(provider === "gemini" ? geminiUrl(api, input.model) : apiUrl(api.endpoint, imagePath), {
 						method: "POST",
 						headers,
 						body,
@@ -483,13 +581,48 @@ http.createServer(async (req, res) => {
 				} finally {
 					activeGenerations.delete(activeTaskId);
 				}
-				const result = await response.json();
-				if (!response.ok) return send(res, response.status, result);
+				let result;
+				try {
+					result = await upstreamJson(response, `${provider} 图片接口`);
+				} catch (error) {
+					return send(res, response.ok ? 502 : response.status, {
+						error: error.message,
+						provider,
+						endpoint: provider === "gemini" ? geminiUrl(api, input.model) : apiUrl(api.endpoint, imagePath),
+						hint: isReferenceRequest ? "当前请求包含参考图，请确认该平台支持图生图接口或 Gemini 图片输入。" : "请确认接口地址是 API 根地址，而不是网站首页。"
+					});
+				}
+				const errorText = JSON.stringify(result).toLowerCase();
+				const canRetryGemini = provider === "openai" && /gemini/i.test(String(input.model || "")) && /images api.*not supported|not supported.*images api|image api.*not supported/.test(errorText);
+				if (!response.ok && canRetryGemini) {
+					responseProvider = "gemini";
+					response = await fetch(geminiUrl(api, input.model), {
+						method: "POST",
+						headers: { "Content-Type": "application/json" },
+						body: JSON.stringify(geminiPayload(input, finalPrompt, referenceImages)),
+						signal: controller.signal
+					});
+					try {
+						result = await upstreamJson(response, "Gemini 回退接口");
+					} catch (error) {
+						return send(res, response.ok ? 502 : response.status, {
+							error: error.message,
+							provider: "gemini",
+							endpoint: geminiUrl(api, input.model),
+							hint: "中转站不支持 OpenAI Images API，且 Gemini 原生接口也未返回 JSON，请核对该中转站的 Gemini 接口地址。"
+						});
+					}
+				}
+				if (!response.ok) return send(res, response.status, {
+					error: friendlyProviderError(result, response.status, isReferenceRequest),
+					provider: responseProvider
+				});
+				const normalizedData = responseProvider === "gemini" ? geminiImages(result) : result.data || [];
 				responses.push({
 					usage: result.usage || null,
-					revisedPrompts: (result.data || []).map((item) => item.revised_prompt).filter(Boolean)
+					revisedPrompts: normalizedData.map((item) => item.revised_prompt).filter(Boolean)
 				});
-				images.push(...result.data || []);
+				images.push(...normalizedData);
 			}
 			if (controller.signal.aborted) return;
 			const persistedImages = await Promise.all(images.map(async (image) => {
@@ -502,17 +635,35 @@ http.createServer(async (req, res) => {
 					sourceUrl: image.url || source
 				};
 			}));
-			Date.now().toString(), (/* @__PURE__ */ new Date()).toISOString(), input.model, input.extraPrompt, input.taskId || crypto.randomUUID(), input.parentResultId, Math.max(1, Number(input.version || 1)), userTemplate?.id, builtIn.id, input.images?.length, (input.materials || []).map((item, index) => ({
-				index: index + 1,
-				role: item.role || "reference",
-				type: item.type
-			})), persistedImages.map((image) => ({
-				...image,
-				id: crypto.randomUUID(),
-				taskId: input.taskId || null,
-				parentResultId: input.parentResultId || null,
-				version: Math.max(1, Number(input.version || 1))
-			}));
+			await appendGenerationRecord({
+				id: Date.now().toString(),
+				createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+				model: input.model,
+				prompt: input.extraPrompt || "",
+				request: {
+					taskId: input.taskId || crypto.randomUUID(),
+					parentResultId: input.parentResultId || null,
+					version: Math.max(1, Number(input.version || 1)),
+					operation,
+					effectivePrompt: finalPrompt,
+					presetId: userTemplate?.id || null,
+					builtinPresetId: builtIn.id,
+					imageCount: input.images?.length || 0,
+					materials: (input.materials || []).map((item, index) => ({
+						index: index + 1,
+						role: item.role || "reference",
+						type: item.type
+					}))
+				},
+				responses,
+				images: persistedImages.map((image) => ({
+					...image,
+					id: crypto.randomUUID(),
+					taskId: input.taskId || null,
+					parentResultId: input.parentResultId || null,
+					version: Math.max(1, Number(input.version || 1))
+				}))
+			});
 			return send(res, 200, {
 				created: Date.now(),
 				data: persistedImages

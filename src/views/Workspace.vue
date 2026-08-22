@@ -7,7 +7,6 @@ import {
   getSettings,
   getModels,
   getPromptTemplates,
-  getBuiltInPromptTemplates,
   generateImage,
   cancelGeneration,
   exportImages,
@@ -21,7 +20,6 @@ const URL = {
 }
 const models = ref([]);
 const presets = ref([]);
-const builtInTemplates = ref([]);
 const configLoading = ref(false)
 const modelLoadError = ref('')
 const templateLoadError = ref('')
@@ -48,8 +46,16 @@ const materials = ref({person: [], pose: [], prop: [], scene: [], reference: []}
 const mode = ref('text')
 const isTextMode = computed(() => mode.value === 'text')
 const imageOperation = ref('batch')
+const visibleImageOperations = ['batch', 'three-view', 'edit']
+const visiblePromptTemplateOperations = new Set(visibleImageOperations)
 const replaceObject = ref('')
 const editParent = ref(null)
+const promptHeight = ref(112)
+const promptResizeActive = ref(false)
+let promptResizeCleanup = null
+const leftRailWidth = ref(286)
+const railResizeActive = ref(false)
+let railResizeCleanup = null
 const HOME_MEMORY_DB = 'sample-factory-home-memory'
 const HOME_MEMORY_STORE = 'workspace'
 const HOME_MEMORY_KEY = 'home'
@@ -169,6 +175,7 @@ const expectedFormula = computed(() => {
   const copies = Math.max(1, Number(count.value || 1))
   if (isTextMode.value) return `1 个文字任务 x ${copies}`
   if (imageOperation.value === 'batch') return `${materials.value.reference.length} 张目标图 x ${copies}`
+  if (imageOperation.value === 'three-view') return `${materials.value.reference.length} 张身份图 x ${copies}`
   return `1 个${operationLabel()}任务 x ${copies}`
 })
 const expectedState = computed(() => {
@@ -176,16 +183,14 @@ const expectedState = computed(() => {
   return imageValidationError() || '可以生成'
 })
 const availableTemplates = computed(() => {
-  const operation = isTextMode.value ? 'text' : imageOperation.value
-  const all = [...builtInTemplates.value, ...presets.value.filter((item) => !builtInTemplates.value.some((base) => base.id === item.id))]
-  return all.filter((item) => (item.mode === 'all' || item.mode === (isTextMode.value ? 'text' : 'image')) && (!item.operation || item.operation === 'all' || item.operation === operation))
+  if (isTextMode.value) return []
+  return presets.value.filter((item) => item.mode === 'image' && visiblePromptTemplateOperations.has(item.operation))
 })
 const preset = computed(() => availableTemplates.value.find((item) => item.id === presetId.value))
 const configStatusTitle = computed(() => {
   if (configLoading.value) return activeWorkspaceName.value ? `正在加载 ${activeWorkspaceName.value} 的模型与提示词预设...` : '正在加载当前工作台的模型与提示词预设...'
   if (modelLoadError.value || templateLoadError.value) return [modelLoadError.value, templateLoadError.value].filter(Boolean).join('；')
   if (!models.value.length) return '当前工作台暂无可用模型，请手动刷新或前往 API 管理检查配置。'
-  if (!availableTemplates.value.length) return '当前模式暂无可用提示词预设，可手动选择其他模式或到提示词预设中配置。'
   return ''
 })
 const configStatusType = computed(() => configLoading.value ? 'info' : 'warning')
@@ -201,9 +206,11 @@ function normalizeConfigSelection() {
   if (!availableTemplates.value.some((item) => item.id === presetId.value)) presetId.value = ''
 }
 materialTypes.push({key: 'scene', label: '背景参考', step: '可选', hint: '用于影响每张目标图的背景与环境', limit: 30})
+materialTypes.push({key: 'pose', label: '动作模仿', step: '可选', hint: '上传后优先模仿动作与身体朝向；未上传则沿用目标图动作', limit: 1})
 const activeMaterialTypes = computed(() => {
   const keys = {
-    batch: ['person', 'reference', 'scene', 'prop'],
+    batch: ['person', 'reference', 'pose', 'scene', 'prop'],
+    'three-view': ['reference'],
     fusion: ['person', 'reference', 'scene', 'prop'],
     background: ['reference', 'scene'],
     prop: ['reference', 'prop'],
@@ -306,7 +313,7 @@ async function restoreHomeMemory() {
     customWidth.value = Number(form.customWidth || customWidth.value)
     customHeight.value = Number(form.customHeight || customHeight.value)
     mode.value = form.mode || mode.value
-    imageOperation.value = form.imageOperation || imageOperation.value
+    imageOperation.value = visibleImageOperations.includes(form.imageOperation) ? form.imageOperation : imageOperation.value
     replaceObject.value = form.replaceObject || ''
     editParent.value = form.editParent || null
     Object.keys(materials.value).forEach((key) => {
@@ -365,7 +372,7 @@ async function buildLabeledReferences(task, materialSet = materials.value) {
 function addFiles(key, upload) {
   const file = rawFile(upload);
   if (!file || !file.type?.startsWith('image/')) return;
-  const limit = key === 'person' ? 3 : 30;
+  const limit = key === 'person' ? 3 : key === 'pose' ? 1 : 30;
   if (materials.value[key].length >= limit) {
     error.value = `${materialLabels[key]}最多添加 ${limit} 张`;
     return;
@@ -387,7 +394,6 @@ async function refresh(options = {}) {
     models.value = []
     model.value = ''
     presets.value = []
-    builtInTemplates.value = []
     presetId.value = ''
   }
   try {
@@ -395,10 +401,9 @@ async function refresh(options = {}) {
     if (requestId !== configRequestId) return
     const activeApi = settings?.apis?.find((item) => item.id === settings.activeApiId)
     activeWorkspaceName.value = activeApi?.name || ''
-    const [modelsResult, userTemplatesResult, builtInTemplatesResult] = await Promise.allSettled([
+    const [modelsResult, userTemplatesResult] = await Promise.allSettled([
       getModels(),
-      getPromptTemplates(),
-      getBuiltInPromptTemplates()
+      getPromptTemplates()
     ])
     if (requestId !== configRequestId) return
     if (modelsResult.status === 'fulfilled') {
@@ -411,8 +416,6 @@ async function refresh(options = {}) {
     }
     if (userTemplatesResult.status === 'fulfilled') presets.value = userTemplatesResult.value || []
     else templateLoadError.value = userTemplatesResult.reason?.message || '提示词预设加载失败'
-    if (builtInTemplatesResult.status === 'fulfilled') builtInTemplates.value = builtInTemplatesResult.value || []
-    else templateLoadError.value = [templateLoadError.value, builtInTemplatesResult.reason?.message || '内置提示词预设加载失败'].filter(Boolean).join('；')
     normalizeConfigSelection()
   } finally {
     if (requestId === configRequestId) configLoading.value = false
@@ -479,7 +482,8 @@ function operationLabel(operation = imageOperation.value) {
     fusion: '多图融合',
     background: '背景替换',
     prop: '道具替换',
-    edit: '局部继续编辑'
+    edit: '局部继续编辑',
+    'three-view': '三视图'
   })[operation] || '图生图'
 }
 
@@ -489,7 +493,12 @@ function buildImageTasks() {
     return materials.value.reference.map((item, index) => ({
       // The target must be the first physical image: several image models use
       // the first input as the editing canvas despite the textual role labels.
-      item, type: 'reference', label: `逐张处理 ${index + 1}`, materialKeys: ['reference', 'person', 'scene', 'prop']
+      item, type: 'reference', label: `逐张处理 ${index + 1}`, materialKeys: ['reference', 'person', 'pose', 'scene', 'prop']
+    }))
+  }
+  if (imageOperation.value === 'three-view') {
+    return materials.value.reference.map((item, index) => ({
+      item, type: 'three-view', label: `三视图 ${index + 1}`, materialKeys: ['reference']
     }))
   }
   if (!target) return []
@@ -506,7 +515,7 @@ function buildImageTasks() {
 }
 
 function imageValidationError() {
-  if (!materials.value.reference.length) return `${operationLabel()}需要一张主目标图`
+  if (!materials.value.reference.length) return `${operationLabel()}需要至少一张上传图片`
   if (imageOperation.value === 'background' && !materials.value.scene.length) return '背景替换需要一张背景参考图'
   if (imageOperation.value === 'edit' && !prompt.value.trim()) return '请说明需要修改的局部内容'
   if (imageOperation.value === 'prop') {
@@ -534,8 +543,13 @@ function buildMaterialPrompt(labeled, taskType = 'text', taskLabel = '提示词�
                           ? `只替换主目标图中的“${replaceObjectText.trim()}”。保持其他主体、位置、比例、透视、接触关系和光线不变，不生成额外道具。`
                           : taskType === 'local-edit'
                               ? '只修改用户指定的局部内容。保持未提及区域的主体、构图、位置、比例、透视、遮挡和光线不变，不重绘整张图片。'
-                              : '只根据补充提示词为人物参考中的同一人物创建一个新变化。';
+                              : taskType === 'three-view'
+                                  ? '以上传图片作为唯一身份参考，生成干净的三视图：同一人物的全身正面、45度三分之二侧脸和90度标准侧脸直接并排展示。严格保持原图的人脸特征、脸型、骨相、发型、服装、配饰和头饰，使用纯白无缝背景、自然彩色和中性影棚白平衡，不添加文字、边框或界面元素。'
+                                  : '只根据补充提示词为人物参考中的同一人物创建一个新变化。';
   const batchMaterialRule = taskType === 'reference' ? [
+    labeled.some((item) => item.role === 'pose_reference')
+      ? '动作模仿图是本次动作的唯一优先来源：严格模仿其中人物的姿势、肢体关系和身体朝向，但不得带入动作图人物的身份、脸部、服装、道具或背景；此时不要以目标图中的原动作覆盖动作模仿图。'
+      : '未上传动作模仿图时，保持并参考目标图中的原有动作、肢体关系和身体朝向。',
     labeled.some((item) => item.role === 'scene_reference') && '背景参考图是必须使用的视觉来源：将背景图中可辨识的场景、地点、室内外环境、主要背景物体、色调和氛围融入主目标图背景，不得忽略或以无关背景替代。',
     labeled.some((item) => item.role === 'prop_reference') && '道具图是必须使用的视觉来源：在主目标图中清晰呈现道具图里的主要道具，保留其可辨识的外形、材质、颜色和关键细节，并使其与人物或画面自然接触；不得省略、替换为其他道具或只保留相似概念。'
   ].filter(Boolean).join('\n') : '';
@@ -921,6 +935,62 @@ function onKeydown(event) {
   }
 }
 
+function setPromptHeight(nextHeight) {
+  promptHeight.value = Math.max(88, Math.min(420, Math.round(nextHeight)))
+}
+
+function startPromptResize(event) {
+  if (event.button !== 0) return
+  event.preventDefault()
+  promptResizeActive.value = true
+  const startY = event.clientY
+  const startHeight = promptHeight.value
+  const onMove = (moveEvent) => setPromptHeight(startHeight + startY - moveEvent.clientY)
+  const onEnd = () => {
+    promptResizeActive.value = false
+    window.removeEventListener('pointermove', onMove)
+    window.removeEventListener('pointerup', onEnd)
+    window.removeEventListener('pointercancel', onEnd)
+    promptResizeCleanup = null
+  }
+  promptResizeCleanup = onEnd
+  window.addEventListener('pointermove', onMove)
+  window.addEventListener('pointerup', onEnd)
+  window.addEventListener('pointercancel', onEnd)
+}
+
+function resizePromptByKeyboard(event) {
+  if (!['ArrowUp', 'ArrowDown', 'Home', 'End'].includes(event.key)) return
+  event.preventDefault()
+  if (event.key === 'Home') return setPromptHeight(88)
+  if (event.key === 'End') return setPromptHeight(420)
+  setPromptHeight(promptHeight.value + (event.key === 'ArrowDown' ? 16 : -16))
+}
+
+function setLeftRailWidth(nextWidth) {
+  leftRailWidth.value = Math.max(220, Math.min(460, Math.round(nextWidth)))
+}
+
+function startRailResize(event) {
+  if (event.button !== 0) return
+  event.preventDefault()
+  railResizeActive.value = true
+  const startX = event.clientX
+  const startWidth = leftRailWidth.value
+  const onMove = (moveEvent) => setLeftRailWidth(startWidth + moveEvent.clientX - startX)
+  const onEnd = () => {
+    railResizeActive.value = false
+    window.removeEventListener('pointermove', onMove)
+    window.removeEventListener('pointerup', onEnd)
+    window.removeEventListener('pointercancel', onEnd)
+    railResizeCleanup = null
+  }
+  railResizeCleanup = onEnd
+  window.addEventListener('pointermove', onMove)
+  window.addEventListener('pointerup', onEnd)
+  window.addEventListener('pointercancel', onEnd)
+}
+
 onMounted(() => window.addEventListener('keydown', onKeydown))
 onMounted(() => window.addEventListener('sample-factory-active-api-changed', onActiveApiChanged))
 watch([
@@ -945,12 +1015,15 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeydown)
   window.removeEventListener('sample-factory-active-api-changed', onActiveApiChanged)
   window.clearTimeout(persistHomeMemoryTimer)
+  promptResizeCleanup?.()
+  railResizeCleanup?.()
   if (!restoringHomeMemory) writeHomeMemory(makeHomeMemorySnapshot()).catch(() => null)
 })
 </script>
 
 <template>
-  <div class="v5-home-layout">
+  <div class="v5-home-layout" :class="{ 'is-rail-resizing': railResizeActive }"
+       :style="{ '--left-rail-width': `${leftRailWidth}px` }">
     <el-form label-position="top" class="workspace-form">
       <div class="grid">
         <aside class="task-setup" aria-label="本次生成任务">
@@ -973,14 +1046,15 @@ onBeforeUnmount(() => {
                 <el-radio-group class="image-operation-options" :model-value="imageOperation"
                                 @change="setImageOperation">
                   <el-radio-button label="batch">逐张批处理</el-radio-button>
-                  <el-radio-button label="fusion">多图融合</el-radio-button>
-                  <el-radio-button label="background">背景替换</el-radio-button>
-                  <el-radio-button label="prop">道具替换</el-radio-button>
+                  <el-radio-button label="three-view">三视图</el-radio-button>
+<!--                  <el-radio-button label="fusion">多图融合</el-radio-button>-->
+<!--                  <el-radio-button label="background">背景替换</el-radio-button>-->
+<!--                  <el-radio-button label="prop">道具替换</el-radio-button>-->
                   <el-radio-button label="edit">局部继续编辑</el-radio-button>
                 </el-radio-group>
               </el-form-item>
               <p class="operation-hint">{{
-                  imageOperation === 'batch' ? '每张目标图独立生成。人物参考固定身份；上传背景和道具图后，会一并影响每张目标图的生成。' : imageOperation === 'fusion' ? '人物、主目标、背景和道具共同组成一个融合任务。' : imageOperation === 'background' ? '只使用主目标图和背景参考图，保留前景主体。' : imageOperation === 'prop' ? '只使用主目标图和道具参考图，指定画面中要替换的对象。' : '从结果中选择一张样片作为基础图，只描述需要修改的局部内容。'
+                  imageOperation === 'batch' ? '每张目标图独立生成。动作模仿图优先决定动作；未上传时沿用目标图动作。人物参考固定身份，背景和道具图可继续叠加。' : imageOperation === 'three-view' ? '每张上传图片独立生成一张三视图；可一次选择多张图片，生成后仍可继续添加并再次批量生成。' : imageOperation === 'fusion' ? '人物、主目标、背景和道具共同组成一个融合任务。' : imageOperation === 'background' ? '只使用主目标图和背景参考图，保留前景主体。' : imageOperation === 'prop' ? '只使用主目标图和道具参考图，指定画面中要替换的对象。' : '从结果中选择一张样片作为基础图，只描述需要修改的局部内容。'
                 }}</p>
               <div v-for="item in activeMaterialTypes" :key="item.key" class="material-box"
                    :class="{ 'is-primary': item.required, 'has-files': materials[item.key].length }">
@@ -1052,17 +1126,20 @@ onBeforeUnmount(() => {
                 </el-select>
               </el-form-item>
               <el-form-item class="quick-control quick-count" label="数量"><el-input-number v-model="count" :min="1" :max="10" controls-position="right"/></el-form-item>
-              <el-form-item class="quick-control quick-format" label="格式">
-                <el-select v-model="format" class="studio-select" popper-class="studio-select-popper"><el-option label="PNG" value="png"/><el-option label="JPG" value="jpg"/><el-option label="WebP" value="webp"/></el-select>
-              </el-form-item>
-              <el-form-item class="quick-control quick-resolution" label="分辨率">
-                <el-select v-model="resolution" class="studio-select" popper-class="studio-select-popper"><el-option label="2K" value="2K"/><el-option label="4K" value="4K"/></el-select>
-              </el-form-item>
+<!--              <el-form-item class="quick-control quick-format" label="格式">-->
+<!--                <el-select v-model="format" class="studio-select" popper-class="studio-select-popper"><el-option label="PNG" value="png"/><el-option label="JPG" value="jpg"/><el-option label="WebP" value="webp"/></el-select>-->
+<!--              </el-form-item>-->
               <div v-if="size === 'custom'" class="quick-custom-size"><el-input-number v-model="customWidth" :min="256" :max="4096" :step="8"/><span>×</span><el-input-number v-model="customHeight" :min="256" :max="4096" :step="8"/></div>
             </div>
-            <div class="prompt-surface">
-              <el-form-item class="composer-prompt">
+            <div class="prompt-surface" :class="{ 'is-resizing': promptResizeActive }">
+              <button type="button" class="prompt-resize-handle" role="separator"
+                      aria-label="调整提示词输入框高度" :aria-valuenow="promptHeight" aria-valuemin="88"
+                      aria-valuemax="420" @pointerdown="startPromptResize" @keydown="resizePromptByKeyboard">
+                <span aria-hidden="true"></span>
+              </button>
+              <el-form-item class="composer-prompt" :class="{ 'is-resizing': promptResizeActive }">
                 <el-input v-model="prompt" type="textarea" :rows="3"
+                          :style="{ '--prompt-height': `${promptHeight}px` }"
                           :placeholder="isTextMode ? '描述想生成的画面、主体、风格和光线' : (imageOperation === 'edit' ? '例如：只把人物外套改成深蓝色，其余画面保持不变' : '仅填写本次额外要求')"/>
               </el-form-item>
               <div class="task-action-bar">
@@ -1082,6 +1159,8 @@ onBeforeUnmount(() => {
         </aside>
       </div>
     </el-form>
+    <button type="button" class="left-rail-resize-handle" aria-label="调整左侧布局宽度"
+            @pointerdown="startRailResize"></button>
     <section class="panel queue">
       <div class="queue-head">
         <div>
