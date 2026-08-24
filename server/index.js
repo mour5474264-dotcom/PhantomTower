@@ -499,11 +499,12 @@ http.createServer(async (req, res) => {
             const operation = promptTemplateOperation(input.operation, mode)
             const builtIns = await read(files.builtInPromptTemplates, [])
             const builtIn = builtIns.find((item) => promptTemplateMatches(item, mode, operation))
-            if (!builtIn) return send(res, 400, {error: '当前功能未配置内置提示词预设，请到提示词预设中完成配置'})
             const templates = await read(files.promptTemplates, [])
             const userTemplate = input.presetId ? templates.find((item) => item.id === input.presetId && promptTemplateMatches(item, mode, operation)) : null
             if (input.presetId && !userTemplate) return send(res, 400, {error: '所选提示词预设不存在，或不适用于当前功能'})
-            const finalPrompt = [builtIn.systemPrompt, builtIn.defaultNegativePrompt && `负向提示词：${builtIn.defaultNegativePrompt}`, input.prompt, userTemplate?.systemPrompt, userTemplate?.defaultNegativePrompt && `负向提示词：${userTemplate.defaultNegativePrompt}`, input.extraPrompt]
+            // Presets improve consistency but are optional. A user-entered prompt
+            // must be enough to generate an image when no matching preset exists.
+            const finalPrompt = [builtIn?.systemPrompt, builtIn?.defaultNegativePrompt && `负向提示词：${builtIn.defaultNegativePrompt}`, input.prompt, userTemplate?.systemPrompt, userTemplate?.defaultNegativePrompt && `负向提示词：${userTemplate.defaultNegativePrompt}`, input.extraPrompt]
                 .filter((value) => typeof value === 'string' && value.trim()).join('\n\n')
             if (!api) return send(res, 400, {error: '请先配置并启用 API'})
             const controller = new AbortController();
@@ -624,7 +625,7 @@ http.createServer(async (req, res) => {
                     operation,
                     effectivePrompt: finalPrompt,
                     presetId: userTemplate?.id || null,
-                    builtinPresetId: builtIn.id,
+                    builtinPresetId: builtIn?.id || null,
                     imageCount: input.images?.length || 0,
                     materials: (input.materials || []).map((item, index) => ({
                         index: index + 1,
