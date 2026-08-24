@@ -26,6 +26,9 @@ jobs:
       - name: Build frontend
         run: npm run build
 
+      - name: Build local server bundle
+        run: npm run build:server
+
       - name: Build Intel Mac package
         run: npx electron-builder --mac dmg zip --x64 --publish never
         env:

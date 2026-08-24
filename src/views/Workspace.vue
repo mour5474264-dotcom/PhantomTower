@@ -1122,7 +1122,7 @@ onBeforeUnmount(() => {
               </el-form-item>
               <el-form-item class="quick-control quick-size" label="尺寸">
                 <el-select v-model="size" class="studio-select" popper-class="studio-select-popper">
-                  <el-option v-if="!isTextMode" label="跟随目标图" value="reference"/><el-option label="2048 × 2048" value="2048x2048"/><el-option label="2560 × 1440" value="2560x1440"/><el-option label="1440 × 2560" value="1440x2560"/><el-option label="3024 × 1296" value="3024x1296"/><el-option label="自定义尺寸" value="custom"/>
+                  <el-option label="根据目标图" value="reference"/><el-option label="2048 × 2048" value="2048x2048"/><el-option label="2560 × 1440" value="2560x1440"/><el-option label="1440 × 2560" value="1440x2560"/><el-option label="3024 × 1296" value="3024x1296"/><el-option label="自定义尺寸" value="custom"/>
                 </el-select>
               </el-form-item>
               <el-form-item class="quick-control quick-count" label="数量"><el-input-number v-model="count" :min="1" :max="10" controls-position="right"/></el-form-item>

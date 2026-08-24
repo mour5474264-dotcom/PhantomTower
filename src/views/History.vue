@@ -1,5 +1,5 @@
 <script setup>
-import {ref, onMounted} from 'vue'
+import {ref, onMounted, onBeforeUnmount} from 'vue'
 import {useRouter} from 'vue-router'
 import {Download, Maximize2, X} from 'lucide-vue-next'
 import {getRecords, downloadImage, exportImages, makeImageFilename} from '../api'
@@ -33,6 +33,8 @@ async function download(url, record, index) {
   try {
     const saved = await downloadImage(url, makeImageFilename(index + 1, 'png'))
     ElMessage.success(`已保存到 ${saved.exportDir || saved.path}`)
+  } catch (e) {
+    ElMessage.error(e?.message || '图片保存失败，请稍后重试')
   } finally {
     savingImage.value = ''
   }
@@ -44,9 +46,19 @@ async function downloadAll(record) {
   try {
     const exported = await exportImages(images(record))
     ElMessage.success(`已导出 ${exported.count} 张图片到 ${exported.exportDir || '本地导出目录'}`)
+  } catch (e) {
+    ElMessage.error(e?.message || '图片导出失败，请稍后重试')
   } finally {
     exportingRecord.value = ''
   }
+}
+
+function closePreview() {
+  preview.value = null
+}
+
+function onPreviewKeydown(event) {
+  if (event.key === 'Escape' && preview.value) closePreview()
 }
 
 function continueEdit(image, record) {
@@ -55,12 +67,14 @@ function continueEdit(image, record) {
 }
 
 onMounted(async () => {
+  window.addEventListener('keydown', onPreviewKeydown)
   try {
     records.value = await getRecords()
   } catch (e) {
     error.value = e.message
   }
 })
+onBeforeUnmount(() => window.removeEventListener('keydown', onPreviewKeydown))
 </script>
 <template>
   <section class="page history-page">
@@ -68,7 +82,7 @@ onMounted(async () => {
     <h2>生成记录</h2>
     <p class="muted">按时间查看已生成的图片。</p>
     <div class="history-scroll">
-      <p v-if="error" class="form-status error">{{ error }}</p>
+       <p v-if="error" class="form-status error" role="alert">{{ error }}</p>
       <div v-if="!records.length" class="empty">暂无生成记录</div>
       <div v-for="record in records" :key="record.id" class="record-card">
         <div class="record-meta">
@@ -81,9 +95,9 @@ onMounted(async () => {
         <p v-if="record.prompt" class="record-prompt">{{ record.prompt }}</p>
         <div class="record-images">
           <div v-for="(image,index) in images(record)" :key="image" class="record-image"><img :src="image"
-                                                                                              alt="生成结果"/>
+                                                                                               :alt="`生成记录 ${formatRecordTime(record.createdAt)}，第 ${index + 1} 张图片`"/>
             <div class="record-image-actions">
-              <button title="预览" @click="preview=image"><Maximize2 :size="14"/></button>
+              <button title="预览" aria-label="预览图片" @click="preview=image"><Maximize2 :size="14"/></button>
               <button :title="savingImage === `${record.id}-${index}` ? '正在保存' : '保存到本地'"
                       :disabled="Boolean(savingImage)" @click="download(image,record,index)">
                 <Download v-if="savingImage !== `${record.id}-${index}`" :size="14"/>
@@ -95,10 +109,10 @@ onMounted(async () => {
         </div>
       </div>
     </div>
-    <div v-if="preview" class="preview-modal" @click.self="preview=null">
-      <button class="preview-close" @click="preview=null">
-        <X/>
-      </button>
+     <div v-if="preview" class="preview-modal" role="dialog" aria-modal="true" aria-label="图片预览" @click.self="closePreview">
+       <button class="preview-close" aria-label="关闭图片预览" @click="closePreview">
+         <X/>
+       </button>
       <img :src="preview" alt="记录图片预览"/></div>
   </section>
 </template>

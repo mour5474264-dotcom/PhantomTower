@@ -126,13 +126,13 @@ onUnmounted(() => {
       <RouterLink to="/apis"><Server :size="17" />API 管理</RouterLink>
     </nav>
     <div class="sidebar-meta api-switcher">
-      <button type="button" class="api-switcher-button" :disabled="apiSwitching" @click="showApiMenu = !showApiMenu">
+      <button type="button" class="api-switcher-button" :disabled="apiSwitching" :aria-expanded="showApiMenu" aria-haspopup="menu" @click="showApiMenu = !showApiMenu">
         <span class="status-light"></span>
         <div><b>{{ activeApi?.name || '未选择工作台' }}</b><small>{{ apiSwitching ? '正在切换工作台...' : (apiSwitchError || 'Desktop workspace') }}</small></div>
         <ChevronDown :size="14" />
       </button>
-      <div v-if="showApiMenu" class="api-switcher-menu">
-        <button v-for="item in apiProfiles" :key="item.id" type="button" :class="{ active: item.id === activeApiId }" @click="selectApi(item.id)">
+      <div v-if="showApiMenu" class="api-switcher-menu" role="menu">
+        <button v-for="item in apiProfiles" :key="item.id" type="button" role="menuitem" :class="{ active: item.id === activeApiId }" @click="selectApi(item.id)">
           <b>{{ item.name }}</b><small>{{ item.endpoint }}</small>
         </button>
         <RouterLink to="/apis" @click="showApiMenu = false">管理工作台配置</RouterLink>

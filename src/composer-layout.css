@@ -114,14 +114,14 @@ main { height: calc(100% - 64px); min-height: 0; overflow: hidden; padding: 12px
 .quick-control.quick-model { flex: 0 0 250px; }
 .quick-control.quick-preset { flex: 0 0 250px; }
 .quick-control.quick-quality { flex: 0 0 122px; }
-.quick-control.quick-size { flex: 0 0 166px; }
+.quick-control.quick-size { flex: 0 0 190px; }
 .quick-control.quick-count { flex: 0 0 100px; }
 .quick-control.quick-format { flex: 0 0 118px; }
 .quick-control.quick-resolution { flex: 0 0 128px; }
 .quick-refresh { flex: 0 0 28px; width: 28px; height: 28px; margin: 0 !important; padding: 0 !important; border: 1px solid #d2ddd8; border-radius: 50%; color: #2a8578; background: #fff; }
 .quick-refresh:hover { border-color: #208273; color: #126d60; background: #eef8f5; }
 .quick-custom-size { display: flex; align-items: center; gap: 4px; flex: 0 0 auto; height: 30px; }
-.quick-custom-size .el-input-number { width: 82px; }
+.quick-custom-size .el-input-number { width: 116px; }
 .quick-custom-size .el-input-number .el-input__wrapper { min-height: 28px; border: 1px solid #d2ddd8; border-radius: 14px; box-shadow: none; }
 .quick-control .el-form-item__label,
 .composer-prompt .el-form-item__label {
@@ -297,4 +297,111 @@ main { height: calc(100% - 64px); min-height: 0; overflow: hidden; padding: 12px
 
 @media (max-width: 700px) {
   .left-rail-resize-handle { display: none; }
+}
+
+/* Shared workspace controls: one visual language for the material rail,
+   prompt dock, and result toolbar. */
+.v5-home-layout {
+  --workspace-primary: #167d70;
+  --workspace-primary-hover: #0f6258;
+  --workspace-danger: #c65345;
+  --workspace-danger-hover: #a83e33;
+  --workspace-border: #cfdad5;
+  --workspace-control-bg: #ffffff;
+}
+
+.v5-home-layout .el-button {
+  min-height: 30px;
+  border-radius: 5px;
+  border-color: var(--workspace-border);
+  color: #41514b;
+  background: var(--workspace-control-bg);
+  transition: color 160ms ease, background-color 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+}
+
+.v5-home-layout .el-button:hover:not(:disabled) {
+  color: var(--workspace-primary);
+  border-color: #8ebdb4;
+  background: #f1faf7;
+}
+
+.v5-home-layout .el-button:focus-visible {
+  outline: 2px solid #58b6a8;
+  outline-offset: 2px;
+}
+
+.v5-home-layout .el-button--primary,
+.v5-home-layout .task-action-bar .el-button--primary {
+  border-color: var(--workspace-primary);
+  background: var(--workspace-primary);
+  color: #fff;
+  box-shadow: 0 2px 7px rgb(22 125 112 / 18%);
+}
+
+.v5-home-layout .el-button--primary:hover:not(:disabled),
+.v5-home-layout .task-action-bar .el-button--primary:hover:not(:disabled) {
+  border-color: var(--workspace-primary-hover);
+  background: var(--workspace-primary-hover);
+  color: #fff;
+}
+
+.v5-home-layout .el-button--danger,
+.v5-home-layout .stop-generation-button {
+  border-color: var(--workspace-danger);
+  background: var(--workspace-danger);
+  color: #fff;
+}
+
+.v5-home-layout .el-button--danger:hover:not(:disabled),
+.v5-home-layout .stop-generation-button:hover:not(:disabled) {
+  border-color: var(--workspace-danger-hover);
+  background: var(--workspace-danger-hover);
+  color: #fff;
+}
+
+.v5-home-layout .rail-new-task {
+  border-color: #a7c9c0;
+  color: var(--workspace-primary);
+  background: #edf8f5;
+  font-weight: 650;
+}
+
+.v5-home-layout .rail-new-task:hover:not(:disabled) {
+  border-color: var(--workspace-primary);
+  color: var(--workspace-primary-hover);
+  background: #e0f2ed;
+}
+
+.v5-home-layout .queue-actions .el-button {
+  min-height: 28px;
+  padding: 0 10px;
+  font-size: 11px;
+}
+
+.v5-home-layout .queue-actions .el-button--primary {
+  color: #fff;
+}
+
+.v5-home-layout .task-action-bar .el-button,
+.v5-home-layout .task-action-bar .stop-generation-button {
+  min-height: 32px;
+  height: 32px;
+  border-radius: 5px;
+  font-weight: 700;
+}
+
+@media (max-width: 700px) {
+  html, body, #app { min-height: 100%; height: auto; }
+  body, main { overflow: visible; }
+  .v5-home-layout .queue-actions {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 6px;
+    width: 100%;
+    margin-top: 8px;
+  }
+  .v5-home-layout .queue-actions .el-button { width: 100%; margin: 0; }
+  .v5-home-layout .task-action-bar { width: 100%; }
+  .v5-home-layout .task-action-bar .el-button,
+  .v5-home-layout .task-action-bar .stop-generation-button { flex: 1; }
 }

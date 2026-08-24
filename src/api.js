@@ -89,16 +89,6 @@ export async function getRecords() {
     return request('/api/records', undefined, '生成记录读取失败')
 }
 
-function clickDownload(url, filename) {
-    const link = document.createElement('a')
-    link.href = url
-    link.download = filename
-    link.style.display = 'none'
-    document.body.appendChild(link)
-    link.click()
-    link.remove()
-}
-
 function shortId() {
     return (globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)).replace(/-/g, '').slice(0, 8)
 }
@@ -131,14 +121,6 @@ export async function downloadImage(url, filename = 'atelier-image.png') {
     const data = await response.json().catch(() => ({}))
     if (!response.ok) throw new Error(data.error || 'image save failed')
     return data
-/*
-    const response = await fetch(downloadUrl(url, filename))
-    if (!response.ok) throw new Error('图片下载失败')
-    const blob = await response.blob()
-    const objectUrl = URL.createObjectURL(blob)
-    clickDownload(objectUrl, filename)
-    setTimeout(() => URL.revokeObjectURL(objectUrl), 1000)
-*/
 }
 
 export async function exportImages(urls, extension = 'png') {

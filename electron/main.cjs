@@ -17,7 +17,17 @@ function createWindow() {
     backgroundColor: '#f1eee7',
     webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: false, preload }
   })
-  win.loadFile(path.join(__dirname, '..', 'web-dist', 'index.html'))
+  const indexFile = path.join(__dirname, '..', 'web-dist', 'index.html')
+  win.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
+    const message = `页面加载失败（${errorCode}）：${errorDescription}\n${validatedURL}`
+    console.error(message)
+    dialog.showErrorBox('样片工厂页面加载失败', `${message}\n\n请查看 data/server.log 或重新安装应用。`)
+  })
+  win.loadFile(indexFile).catch((error) => {
+    const message = `无法加载页面文件：${indexFile}\n${error.message}`
+    console.error(message)
+    dialog.showErrorBox('样片工厂启动失败', message)
+  })
 }
 
 function licenseFilePath() { return path.join(app.getPath('userData'), 'license.json') }
@@ -171,7 +181,11 @@ app.whenReady().then(async () => {
     : path.join(__dirname, '..', 'server', 'index.js')
   const serverCwd = app.isPackaged ? path.dirname(serverEntry) : path.join(__dirname, '..')
   const installDir = app.isPackaged ? path.dirname(process.execPath) : path.join(__dirname, '..')
-  const dataDir = path.join(installDir, 'data')
+  // A macOS .app bundle is commonly installed under /Applications and is not
+  // writable by the current user. Keep runtime data outside that bundle.
+  const dataDir = process.platform === 'darwin'
+    ? path.join(app.getPath('userData'), 'data')
+    : path.join(installDir, 'data')
   // Older installers wrote this file before electron-builder finalized
   // $INSTDIR, leaving it one directory above the executable. Read that legacy
   // location once so existing installations keep their chosen export folder.
