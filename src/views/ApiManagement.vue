@@ -2,14 +2,14 @@
 import {ref} from 'vue'
 import {ElMessage} from 'element-plus'
 import {Plus, Trash2, CheckCircle2, Wifi, Edit3} from 'lucide-vue-next'
-import {getSettings, saveSettings, getModels, notifyActiveApiChanged} from '../api'
+import {saveSettings, testApiConnection, notifyActiveApiChanged} from '../api'
 
-const profiles = ref([])
-const activeId = ref('')
+const profiles = ref(JSON.parse(localStorage.getItem('atelier-apis') || '[]'))
+const activeId = ref(localStorage.getItem('atelier-active-api') || '')
 const dialog = ref(false)
 const editingId = ref('')
 const status = ref('')
-const testing = ref(false)
+const testingId = ref('')
 const blank = () => ({name: '', endpoint: '', key: '', provider: ''})
 const form = ref(blank())
 
@@ -69,25 +69,17 @@ async function activate(id) {
 }
 
 async function test(item) {
-  testing.value = true;
-  activeId.value = item.id;
-  await persist();
+  if (testingId.value) return
+  testingId.value = item.id;
   try {
-    const models = await getModels();
+    const models = await testApiConnection(item);
     ElMessage.success(`连接成功，读取到 ${models.length} 个模型`)
   } catch (e) {
     ElMessage.error(`连接失败：${e.message}`)
   } finally {
-    testing.value = false
+    testingId.value = ''
   }
 }
-
-getSettings().then((data) => {
-  profiles.value = data.apis || [];
-  activeId.value = data.activeApiId || ''
-}).catch((e) => {
-  status.value = e.message
-})
 </script>
 
 <template>
@@ -117,7 +109,7 @@ getSettings().then((data) => {
         </el-table-column>
         <el-table-column label="操作" width="290" fixed="right">
           <template #default="{ row }">
-            <el-button link @click="test(row)">测试连接</el-button>
+            <el-button link :loading="testingId === row.id" :disabled="Boolean(testingId)" @click="test(row)">测试连接</el-button>
             <el-button link @click="openEdit(row)">编辑</el-button>
             <el-button link type="danger" @click="remove(row.id)">删除</el-button>
           </template>

@@ -8,13 +8,13 @@ const activeTab = ref('user')
 const templates = ref([])
 const dialog = ref(false)
 const editingId = ref('')
-const form = ref({name: '', mode: 'all', operation: 'all', systemPrompt: '', defaultNegativePrompt: ''})
+const form = ref({name: '', systemPrompt: '', defaultNegativePrompt: ''})
 
 const isBuiltIn = computed(() => activeTab.value === 'builtin')
 const title = computed(() => isBuiltIn.value ? '内置提示词预设' : '提示词预设')
 const description = computed(() => isBuiltIn.value
   ? '内置预设会根据创作台当前功能自动生效，不会在创作台显示。'
-  : '保存可重复使用的创作提示词；创作台可按需选择，不会自动带入。')
+  : '保存可重复使用的创作提示词；创作台的所有模式均可按需选择。')
 
 async function loadTemplates() {
   try {
@@ -31,27 +31,31 @@ function changeTab(tab) {
 
 function openCreate() {
   editingId.value = ''
-  form.value = {name: '', mode: isBuiltIn.value ? 'text' : 'all', operation: isBuiltIn.value ? 'text' : 'all', systemPrompt: '', defaultNegativePrompt: ''}
+  form.value = {name: '', systemPrompt: '', defaultNegativePrompt: ''}
   dialog.value = true
 }
 
 function edit(item) {
   editingId.value = item.id
-  form.value = {...item}
+  form.value = {name: item.name, systemPrompt: item.systemPrompt, defaultNegativePrompt: item.defaultNegativePrompt || ''}
   dialog.value = true
 }
 
 function copyTemplate(item) {
   editingId.value = ''
-  form.value = {...item, id: crypto.randomUUID(), name: `${item.name} 副本`, version: undefined, updatedAt: undefined}
+  form.value = {name: `${item.name} 副本`, systemPrompt: item.systemPrompt, defaultNegativePrompt: item.defaultNegativePrompt || ''}
   dialog.value = true
 }
 
 async function save() {
   if (!form.value.name.trim() || !form.value.systemPrompt.trim()) return ElMessage.warning('请填写预设名称和提示词内容')
   const next = templates.value.map((item) => ({...item}))
-  if (editingId.value) Object.assign(next.find((item) => item.id === editingId.value), form.value)
-  else next.push({id: crypto.randomUUID(), ...form.value})
+  const existingTemplate = next.find((item) => item.id === editingId.value)
+  const template = isBuiltIn.value
+    ? {...form.value, mode: existingTemplate?.mode || 'text', operation: existingTemplate?.operation || 'text'}
+    : {...form.value, mode: 'all', operation: 'all'}
+  if (editingId.value) Object.assign(existingTemplate, template)
+  else next.push({id: crypto.randomUUID(), ...template})
   try {
     templates.value = isBuiltIn.value ? await saveBuiltInPromptTemplates(next) : await savePromptTemplates(next)
     dialog.value = false
@@ -106,8 +110,6 @@ onMounted(async () => {
       <el-table v-if="templates.length" :data="templates" stripe>
         <el-table-column type="index" label="#" width="64"/>
         <el-table-column prop="name" label="预设名称" min-width="180"/>
-        <el-table-column prop="mode" label="适用模式" width="110"/>
-        <el-table-column prop="operation" label="处理方式" width="130"/>
         <el-table-column prop="systemPrompt" label="提示词内容" min-width="330" show-overflow-tooltip/>
         <el-table-column label="操作" width="190" fixed="right">
           <template #default="{ row }">
@@ -122,12 +124,6 @@ onMounted(async () => {
     <el-dialog v-model="dialog" :title="editingId ? `编辑${title}` : `新增${title}`" width="680px">
       <el-form label-position="top">
         <el-form-item label="预设名称"><el-input v-model="form.name"/></el-form-item>
-        <el-form-item label="适用模式">
-          <el-radio-group v-model="form.mode"><el-radio-button label="all">通用</el-radio-button><el-radio-button label="text">文生图</el-radio-button><el-radio-button label="image">图生图</el-radio-button></el-radio-group>
-        </el-form-item>
-        <el-form-item label="适用处理方式">
-          <el-select v-model="form.operation"><el-option label="全部处理方式" value="all"/><el-option label="文生图" value="text"/><el-option label="逐张人物替换" value="batch"/><el-option label="多图融合" value="fusion"/><el-option label="背景替换" value="background"/><el-option label="道具替换" value="prop"/><el-option label="局部编辑" value="edit"/></el-select>
-        </el-form-item>
         <el-form-item :label="isBuiltIn ? '内置提示词' : '提示词内容'"><el-input v-model="form.systemPrompt" type="textarea" :rows="6"/></el-form-item>
         <el-form-item label="默认负向提示词（可选）"><el-input v-model="form.defaultNegativePrompt" type="textarea" :rows="3"/></el-form-item>
       </el-form>

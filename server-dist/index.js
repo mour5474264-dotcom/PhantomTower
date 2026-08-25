@@ -21,6 +21,7 @@ var files = {
 };
 var activeGenerations = /* @__PURE__ */ new Map();
 var recordsWriteQueue = Promise.resolve();
+var imageGenerationTimeoutMs = 9e4;
 function wait(ms) {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -198,9 +199,34 @@ function geminiImages(result) {
 function friendlyProviderError(result, status, referenceRequest = false) {
 	const raw = typeof result === "string" ? result : result?.error?.message || result?.error || result?.message || "";
 	const text = String(raw);
+	if (status === 400 && /(?:invalid|unsupported|not supported).{0,80}(?:size|dimension|resolution|width|height)|(?:size|dimension|resolution|width|height).{0,80}(?:invalid|unsupported|not supported)/i.test(text)) return "当前模型或中转站不支持所选图片尺寸。请改用 1024x1080，或在 API 管理中确认该模型支持 2160x3240。";
+	if (status === 413) return "图片请求过大，当前模型或中转站无法处理该尺寸或参考图。请改用 1024x1080，或减少参考图数量后重试。";
 	if (/images api.*not supported|image api.*not supported|not supported.*images api/i.test(text)) return referenceRequest ? "当前中转站不支持图片编辑/图生图接口，请确认该平台提供图生图能力，或更换支持参考图的模型。" : "当前中转站不支持图片生成接口，请更换支持图片生成的模型或 API。";
 	if (/invalid.*key|api.?key|unauthorized|forbidden/i.test(text) && (status === 401 || status === 403)) return "API Key 无效或没有权限，请检查密钥和账号套餐。";
 	return text || `图片接口调用失败（HTTP ${status}）。请检查 API 地址、协议和模型配置。`;
+}
+function upstreamFetchError(error, context, size = "") {
+	const code = String(error?.cause?.code || error?.code || "");
+	const sizeText = size ? `（请求尺寸 ${size}）` : "";
+	if (error?.generationTimedOut || error?.name === "AbortError") return `${context}超时${sizeText}。图片生成耗时过长，请稍后重试；也可改用 1024x1080。`;
+	if (code === "ENOTFOUND" || code === "EAI_AGAIN") return `无法解析图片服务地址${sizeText}。请检查网络、DNS 或 API 地址后重试。`;
+	if (code === "ECONNREFUSED" || code === "ECONNRESET" || code === "ETIMEDOUT" || code === "UND_ERR_CONNECT_TIMEOUT") return `无法连接图片服务${sizeText}。请检查网络、代理或中转站状态后重试。`;
+	return `${context}网络连接失败${sizeText}。请检查网络、代理和中转站状态后重试。`;
+}
+async function fetchImageGeneration(url, options) {
+	const timeoutController = new AbortController();
+	const timeout = setTimeout(() => timeoutController.abort(), imageGenerationTimeoutMs);
+	try {
+		return await fetch(url, {
+			...options,
+			signal: AbortSignal.any([options.signal, timeoutController.signal])
+		});
+	} catch (error) {
+		if (timeoutController.signal.aborted) error.generationTimedOut = true;
+		throw error;
+	} finally {
+		clearTimeout(timeout);
+	}
 }
 function appendGenerationRecord(record) {
 	recordsWriteQueue = recordsWriteQueue.catch(() => null).then(async () => {
@@ -233,6 +259,23 @@ async function activeApi() {
 	});
 	return settings.apis.find((item) => item.id === settings.activeApiId);
 }
+async function fetchModels(api) {
+	if (!api?.endpoint || !api?.key) throw new Error("请填写 API 地址和 API Key");
+	const provider = apiProvider(api);
+	const response = provider === "gemini" ? await fetch(`${String(api.endpoint).replace(/\/+$/, "").replace(/\/v1beta$|\/v1$|\/v1alpha$/i, "")}/v1beta/models?key=${encodeURIComponent(api.key)}`) : await fetch(apiUrl(api.endpoint, "models"), { headers: { Authorization: `Bearer ${api.key}` } });
+	const payload = await upstreamJson(response, "模型接口");
+	if (provider === "gemini" && response.ok) return {
+		status: 200,
+		payload: { data: (payload.models || []).filter((item) => (item.supportedGenerationMethods || []).includes("generateContent")).map((item) => ({
+			id: String(item.name || "").replace(/^models\//, ""),
+			name: item.displayName || item.name
+		})) }
+	};
+	return {
+		status: response.status,
+		payload
+	};
+}
 function cacheKey(url) {
 	return crypto.createHash("sha256").update(url).digest("hex");
 }
@@ -242,7 +285,73 @@ function exportStamp() {
 function imageExtension(contentType) {
 	if (/jpe?g/i.test(contentType)) return "jpg";
 	if (/webp/i.test(contentType)) return "webp";
+	if (/gif/i.test(contentType)) return "gif";
 	return "png";
+}
+function imageContentType(filename) {
+	const extension = path.extname(String(filename || "")).toLowerCase();
+	if (extension === ".jpg" || extension === ".jpeg") return "image/jpeg";
+	if (extension === ".webp") return "image/webp";
+	if (extension === ".gif") return "image/gif";
+	return "image/png";
+}
+function detectedImageContentType(buffer, fallback = "image/png") {
+	if (buffer.subarray(0, 3).toString("hex") === "ffd8ff") return "image/jpeg";
+	if (buffer.subarray(0, 8).toString("hex") === "89504e470d0a1a0a") return "image/png";
+	if (buffer.subarray(0, 4).toString("ascii") === "RIFF" && buffer.subarray(8, 12).toString("ascii") === "WEBP") return "image/webp";
+	if (buffer.subarray(0, 3).toString("ascii") === "GIF") return "image/gif";
+	return fallback;
+}
+function filenameWithImageExtension(filename, contentType) {
+	const safeName = String(filename || "atelier-image").replace(/[^a-zA-Z0-9._-]/g, "_");
+	return `${path.basename(safeName, path.extname(safeName)) || "atelier-image"}.${imageExtension(contentType)}`;
+}
+async function repairStoredImageExtensions() {
+	let names;
+	try {
+		names = await fs.readdir(generatedDir);
+	} catch (error) {
+		if (error.code === "ENOENT") return;
+		throw error;
+	}
+	const renamed = /* @__PURE__ */ new Map();
+	for (const name of names) {
+		const source = path.join(generatedDir, name);
+		let buffer;
+		try {
+			buffer = await fs.readFile(source);
+		} catch {
+			continue;
+		}
+		const contentType = detectedImageContentType(buffer, imageContentType(name));
+		const expected = filenameWithImageExtension(name, contentType);
+		if (expected === name) continue;
+		const target = path.join(generatedDir, expected);
+		try {
+			await fs.access(target);
+			await fs.rm(source);
+		} catch (error) {
+			if (error.code !== "ENOENT") throw error;
+			await fs.rename(source, target);
+		}
+		renamed.set(name, {
+			filename: expected,
+			contentType
+		});
+	}
+	if (!renamed.size) return;
+	const cache = await read(files.imageCache, {});
+	for (const entry of Object.values(cache)) {
+		const replacement = renamed.get(entry?.filename);
+		if (replacement) Object.assign(entry, replacement);
+	}
+	await write(files.imageCache, cache);
+	const records = await read(files.records, []);
+	for (const record of records) for (const image of record?.images || []) {
+		const replacement = renamed.get(String(image?.url || "").split("/").pop());
+		if (replacement) image.url = generatedUrl(replacement.filename);
+	}
+	await write(files.records, records);
 }
 function generatedUrl(filename) {
 	return `http://127.0.0.1:4317/api/generated/${encodeURIComponent(filename)}`;
@@ -285,12 +394,14 @@ async function cacheImage(url) {
 		clearTimeout(timeout);
 	}
 	if (!response.ok) throw new Error(`image request failed: ${response.status}`);
-	const contentType = response.headers.get("content-type") || "image/png";
+	const headerContentType = response.headers.get("content-type") || "image/png";
+	const buffer = Buffer.from(await response.arrayBuffer());
+	const contentType = detectedImageContentType(buffer, headerContentType);
 	const entry = {
 		filename: `${cacheKey(url)}.${imageExtension(contentType)}`,
 		contentType
 	};
-	const file = await writeGeneratedImage(entry.filename, Buffer.from(await response.arrayBuffer()));
+	const file = await writeGeneratedImage(entry.filename, buffer);
 	const cache = await read(files.imageCache, {});
 	cache[cacheKey(url)] = entry;
 	await write(files.imageCache, cache);
@@ -303,14 +414,15 @@ async function persistImage(url) {
 	if (/^data:image\//i.test(url)) {
 		const match = url.match(/^data:([^;]+);base64,(.+)$/s);
 		if (!match) throw new Error("invalid image data");
-		const contentType = match[1];
+		const buffer = Buffer.from(match[2], "base64");
+		const contentType = detectedImageContentType(buffer, match[1]);
 		const filename = `${cacheKey(url)}.${imageExtension(contentType)}`;
 		const file = path.join(generatedDir, filename);
 		await fs.mkdir(generatedDir, { recursive: true });
 		try {
 			await fs.access(file);
 		} catch {
-			await writeGeneratedImage(filename, Buffer.from(match[2], "base64"));
+			await writeGeneratedImage(filename, buffer);
 		}
 		return {
 			filename,
@@ -324,7 +436,7 @@ async function persistImage(url) {
 		await fs.access(file);
 		return {
 			filename,
-			contentType: filename.endsWith(".jpg") || filename.endsWith(".jpeg") ? "image/jpeg" : filename.endsWith(".webp") ? "image/webp" : "image/png",
+			contentType: imageContentType(filename),
 			file
 		};
 	}
@@ -334,9 +446,10 @@ async function getDownloadImage(url) {
 	if (/^data:image\//i.test(url)) {
 		const match = url.match(/^data:([^;]+);base64,(.+)$/s);
 		if (!match) throw new Error("invalid image data");
+		const buffer = Buffer.from(match[2], "base64");
 		return {
-			buffer: Buffer.from(match[2], "base64"),
-			contentType: match[1]
+			buffer,
+			contentType: detectedImageContentType(buffer, match[1])
 		};
 	}
 	if (/^https?:/i.test(url) && !url.startsWith("http://127.0.0.1:4317/api/generated/")) {
@@ -352,6 +465,7 @@ async function getDownloadImage(url) {
 		contentType: local.contentType
 	};
 }
+await repairStoredImageExtensions();
 http.createServer(async (req, res) => {
 	if (req.method === "OPTIONS") {
 		res.writeHead(204, {
@@ -424,7 +538,7 @@ http.createServer(async (req, res) => {
 			try {
 				const file = path.join(generatedDir, name);
 				const buffer = await fs.readFile(file);
-				const type = name.endsWith(".jpg") || name.endsWith(".jpeg") ? "image/jpeg" : "image/png";
+				const type = imageContentType(name);
 				res.writeHead(200, {
 					"Content-Type": type,
 					"Cache-Control": "public, max-age=31536000",
@@ -451,8 +565,8 @@ http.createServer(async (req, res) => {
 		if (req.url === "/api/save-image" && req.method === "POST") {
 			const { url, filename = "atelier-image.png" } = await json(req);
 			if (!url || typeof url !== "string") return send(res, 400, { error: "invalid image url" });
-			const safeName = String(filename).replace(/[^a-zA-Z0-9._-]/g, "_");
 			const image = await getDownloadImage(url);
+			const safeName = filenameWithImageExtension(filename, image.contentType);
 			await fs.mkdir(exportDir, { recursive: true });
 			const target = path.join(exportDir, safeName);
 			await fs.writeFile(target, image.buffer);
@@ -475,13 +589,13 @@ http.createServer(async (req, res) => {
 			});
 		}
 		if (req.url === "/api/export" && req.method === "POST") {
-			const { urls = [], extension = "png" } = await json(req);
+			const { urls = [] } = await json(req);
 			if (!urls.length) return send(res, 400, { error: "请选择图片" });
 			const batch = exportStamp();
 			await fs.mkdir(exportDir, { recursive: true });
 			const saved = await Promise.all(urls.map(async (url, index) => {
 				const image = await getDownloadImage(url);
-				const filename = `phantom-tower-${batch}-${index + 1}.${extension}`.replace(/[^a-zA-Z0-9._-]/g, "_");
+				const filename = filenameWithImageExtension(`phantom-tower-${batch}-${index + 1}`, image.contentType);
 				const target = path.join(exportDir, filename);
 				await fs.writeFile(target, image.buffer);
 				return {
@@ -499,13 +613,12 @@ http.createServer(async (req, res) => {
 		if (req.url === "/api/models" && req.method === "GET") {
 			const api = await activeApi();
 			if (!api) return send(res, 400, { error: "请先配置并启用 API" });
-			const response = apiProvider(api) === "gemini" ? await fetch(`${String(api.endpoint).replace(/\/+$/, "").replace(/\/v1beta$|\/v1$|\/v1alpha$/i, "")}/v1beta/models?key=${encodeURIComponent(api.key)}`) : await fetch(apiUrl(api.endpoint, "models"), { headers: { Authorization: `Bearer ${api.key}` } });
-			const payload = await upstreamJson(response, "模型接口");
-			if (apiProvider(api) === "gemini" && response.ok) return send(res, 200, { data: (payload.models || []).filter((item) => (item.supportedGenerationMethods || []).includes("generateContent")).map((item) => ({
-				id: String(item.name || "").replace(/^models\//, ""),
-				name: item.displayName || item.name
-			})) });
-			return send(res, response.status, payload);
+			const result = await fetchModels(api);
+			return send(res, result.status, result.payload);
+		}
+		if (req.url === "/api/models/test" && req.method === "POST") {
+			const result = await fetchModels(await json(req));
+			return send(res, result.status, result.payload);
 		}
 		if (req.url === "/api/generate" && req.method === "POST") {
 			const input = await json(req);
@@ -515,8 +628,8 @@ http.createServer(async (req, res) => {
 			const operation = promptTemplateOperation(input.operation, mode);
 			const builtIn = (await read(files.builtInPromptTemplates, [])).find((item) => promptTemplateMatches(item, mode, operation));
 			const templates = await read(files.promptTemplates, []);
-			const userTemplate = input.presetId ? templates.find((item) => item.id === input.presetId && promptTemplateMatches(item, mode, operation)) : null;
-			if (input.presetId && !userTemplate) return send(res, 400, { error: "所选提示词预设不存在，或不适用于当前功能" });
+			const userTemplate = input.presetId ? templates.find((item) => item.id === input.presetId) : null;
+			if (input.presetId && !userTemplate) return send(res, 400, { error: "所选提示词预设不存在" });
 			const finalPrompt = [
 				builtIn?.systemPrompt,
 				builtIn?.defaultNegativePrompt && `负向提示词：${builtIn.defaultNegativePrompt}`,
@@ -571,11 +684,17 @@ http.createServer(async (req, res) => {
 				let response;
 				let responseProvider = provider;
 				try {
-					response = await fetch(provider === "gemini" ? geminiUrl(api, input.model) : apiUrl(api.endpoint, imagePath), {
+					response = await fetchImageGeneration(provider === "gemini" ? geminiUrl(api, input.model) : apiUrl(api.endpoint, imagePath), {
 						method: "POST",
 						headers,
 						body,
 						signal: controller.signal
+					});
+				} catch (error) {
+					return send(res, 504, {
+						error: upstreamFetchError(error, "图片生成接口", input.size),
+						provider,
+						hint: `本次请求尺寸为 ${input.size || "默认尺寸"}；2160x3240 仅在当前模型和中转站支持时可用。`
 					});
 				} finally {
 					activeGenerations.delete(activeTaskId);
@@ -595,12 +714,20 @@ http.createServer(async (req, res) => {
 				const canRetryGemini = provider === "openai" && /gemini/i.test(String(input.model || "")) && /images api.*not supported|not supported.*images api|image api.*not supported/.test(errorText);
 				if (!response.ok && canRetryGemini) {
 					responseProvider = "gemini";
-					response = await fetch(geminiUrl(api, input.model), {
-						method: "POST",
-						headers: { "Content-Type": "application/json" },
-						body: JSON.stringify(geminiPayload(input, finalPrompt, referenceImages)),
-						signal: controller.signal
-					});
+					try {
+						response = await fetchImageGeneration(geminiUrl(api, input.model), {
+							method: "POST",
+							headers: { "Content-Type": "application/json" },
+							body: JSON.stringify(geminiPayload(input, finalPrompt, referenceImages)),
+							signal: controller.signal
+						});
+					} catch (error) {
+						return send(res, 504, {
+							error: upstreamFetchError(error, "Gemini 回退接口", input.size),
+							provider: "gemini",
+							hint: `本次请求尺寸为 ${input.size || "默认尺寸"}；请确认 Gemini 接口地址、网络和中转站状态。`
+						});
+					}
 					try {
 						result = await upstreamJson(response, "Gemini 回退接口");
 					} catch (error) {
@@ -624,16 +751,26 @@ http.createServer(async (req, res) => {
 				images.push(...normalizedData);
 			}
 			if (controller.signal.aborted) return;
-			const persistedImages = await Promise.all(images.map(async (image) => {
-				const source = image?.url || (image?.b64_json ? `data:image/png;base64,${image.b64_json}` : "");
-				if (!source) return image;
-				const local = await persistImage(source);
-				return {
-					...image,
-					url: generatedUrl(local.filename),
-					sourceUrl: image.url || source
-				};
-			}));
+			let persistedImages;
+			try {
+				persistedImages = await Promise.all(images.map(async (image) => {
+					const contentType = image?.mime_type || image?.content_type || "image/png";
+					const source = image?.url || (image?.b64_json ? `data:${contentType};base64,${image.b64_json}` : "");
+					if (!source) return image;
+					const local = await persistImage(source);
+					return {
+						...image,
+						url: generatedUrl(local.filename),
+						sourceUrl: image.url || source
+					};
+				}));
+			} catch (error) {
+				return send(res, 502, {
+					error: upstreamFetchError(error, "生成结果下载", input.size),
+					provider: responseProvider,
+					hint: "图片接口可能已经生成成功，但应用无法从上游下载图片保存到本地。请稍后重试。"
+				});
+			}
 			await appendGenerationRecord({
 				id: Date.now().toString(),
 				createdAt: (/* @__PURE__ */ new Date()).toISOString(),

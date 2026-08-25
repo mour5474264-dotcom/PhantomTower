@@ -35,6 +35,15 @@ export async function getModels() {
     return data.data || data.models || []
 }
 
+export async function testApiConnection(api) {
+    const data = await request('/api/models/test', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(api)
+    }, '连接测试失败')
+    return data.data || data.models || []
+}
+
 export async function generateImage(input, options = {}) {
     return request('/api/generate', {
         method: 'POST',
@@ -62,7 +71,7 @@ export async function savePresets(value) {
 }
 
 export async function getPromptTemplates() {
-    return request('/api/prompt-templates', undefined, '提示词模板读取失败')
+    return request('/api/prompt-templates', {cache: 'no-store'}, '提示词模板读取失败')
 }
 
 export async function savePromptTemplates(value) {

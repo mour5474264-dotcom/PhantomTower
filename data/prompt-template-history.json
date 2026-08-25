@@ -1,5 +1,53 @@
 [
   {
+    "id": "9dca2774-1a87-4086-b9b6-e6292050cd15",
+    "name": "1122",
+    "mode": "all",
+    "operation": "all",
+    "systemPrompt": "111112",
+    "defaultNegativePrompt": "11",
+    "updatedAt": "2026-08-25T08:15:18.435Z",
+    "version": 4,
+    "archivedAt": "2026-08-25T08:20:17.085Z",
+    "action": "updated"
+  },
+  {
+    "id": "9dca2774-1a87-4086-b9b6-e6292050cd15",
+    "name": "112",
+    "mode": "all",
+    "operation": "all",
+    "systemPrompt": "111112",
+    "defaultNegativePrompt": "11",
+    "updatedAt": "2026-08-25T08:15:02.740Z",
+    "version": 3,
+    "archivedAt": "2026-08-25T08:15:18.436Z",
+    "action": "updated"
+  },
+  {
+    "id": "9dca2774-1a87-4086-b9b6-e6292050cd15",
+    "name": "11",
+    "mode": "all",
+    "operation": "all",
+    "systemPrompt": "111112",
+    "defaultNegativePrompt": "11",
+    "updatedAt": "2026-08-25T08:14:53.290Z",
+    "version": 2,
+    "archivedAt": "2026-08-25T08:15:02.741Z",
+    "action": "updated"
+  },
+  {
+    "id": "9dca2774-1a87-4086-b9b6-e6292050cd15",
+    "name": "11",
+    "mode": "image",
+    "operation": "batch",
+    "systemPrompt": "1111",
+    "defaultNegativePrompt": "11",
+    "updatedAt": "2026-08-25T07:28:20.146Z",
+    "version": 1,
+    "archivedAt": "2026-08-25T08:14:53.291Z",
+    "action": "updated"
+  },
+  {
     "id": "person-replace",
     "name": "逐张人物替换规则",
     "mode": "image",

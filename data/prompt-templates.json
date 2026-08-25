@@ -1,0 +1,22 @@
+[
+  {
+    "id": "9dca2774-1a87-4086-b9b6-e6292050cd15",
+    "name": "11223",
+    "mode": "all",
+    "operation": "all",
+    "systemPrompt": "111112",
+    "defaultNegativePrompt": "11",
+    "updatedAt": "2026-08-25T08:20:17.085Z",
+    "version": 5
+  },
+  {
+    "id": "cd6957a8-451f-46a4-9266-2e6ff52af4b0",
+    "name": "22",
+    "mode": "all",
+    "operation": "all",
+    "systemPrompt": "11111",
+    "defaultNegativePrompt": "111",
+    "updatedAt": "2026-08-25T07:53:52.211Z",
+    "version": 1
+  }
+]

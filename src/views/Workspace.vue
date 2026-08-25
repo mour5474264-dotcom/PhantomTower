@@ -32,8 +32,8 @@ const count = ref(1);
 const resolution = ref('2K');
 const format = ref('png');
 const size = ref('reference');
-const customWidth = ref(2048);
-const customHeight = ref(2048);
+const customWidth = ref(null);
+const customHeight = ref(null);
 const running = ref(false);
 const completedCount = ref(0);
 const generationTotal = ref(0);
@@ -47,7 +47,6 @@ const mode = ref('text')
 const isTextMode = computed(() => mode.value === 'text')
 const imageOperation = ref('batch')
 const visibleImageOperations = ['batch', 'three-view', 'edit']
-const visiblePromptTemplateOperations = new Set(visibleImageOperations)
 const replaceObject = ref('')
 const editParent = ref(null)
 const promptHeight = ref(112)
@@ -63,6 +62,23 @@ const HOME_MEMORY_VERSION = 1
 let restoringHomeMemory = true
 let persistHomeMemoryTimer = 0
 let configRequestId = 0
+
+function showMessage(type, message) {
+  if (!message) return
+  ElMessage({
+    type,
+    message,
+    duration: type === 'error' ? 5000 : 3500,
+    showClose: true,
+    grouping: true
+  })
+}
+
+watch(error, (message) => {
+  if (!message) return
+  showMessage('error', message)
+  error.value = ''
+})
 
 function openHomeMemoryDb() {
   return new Promise((resolve, reject) => {
@@ -128,15 +144,16 @@ function fileToDataUrl(file) {
 }
 
 async function getRequestSize(task, requestConfig) {
-  if (requestConfig.size !== 'reference') return requestConfig.size === 'custom' ? `${requestConfig.customWidth}x${requestConfig.customHeight}` : requestConfig.size;
+  if (requestConfig.size === 'custom') return `${requestConfig.customWidth}x${requestConfig.customHeight}`;
+  if (requestConfig.size !== 'reference') return requestConfig.size;
   const file = rawFile(task.item);
-  if (!file || task.type === 'text') return '2048x2048';
+  if (!file || task.type === 'text') return '1024x1080';
   const bitmap = await createImageBitmap(file, {imageOrientation: 'from-image'});
   const ratio = bitmap.width / bitmap.height;
   bitmap.close();
-  if (ratio > 1.15) return '2560x1440';
-  if (ratio < 0.87) return '1440x2560';
-  return '2048x2048';
+  if (ratio < 0.6) return '2160x3840';
+  if (ratio < 0.8) return '2160x3240';
+  return '1024x1080';
 }
 
 const materialLabels = {
@@ -183,8 +200,7 @@ const expectedState = computed(() => {
   return imageValidationError() || '可以生成'
 })
 const availableTemplates = computed(() => {
-  if (isTextMode.value) return []
-  return presets.value.filter((item) => item.mode === 'image' && visiblePromptTemplateOperations.has(item.operation))
+  return presets.value
 })
 const preset = computed(() => availableTemplates.value.find((item) => item.id === presetId.value))
 const configStatusTitle = computed(() => {
@@ -310,8 +326,8 @@ async function restoreHomeMemory() {
     resolution.value = form.resolution || resolution.value
     format.value = form.format || format.value
     size.value = form.size || size.value
-    customWidth.value = Number(form.customWidth || customWidth.value)
-    customHeight.value = Number(form.customHeight || customHeight.value)
+    customWidth.value = form.customWidth ? Number(form.customWidth) : null
+    customHeight.value = form.customHeight ? Number(form.customHeight) : null
     mode.value = form.mode || mode.value
     imageOperation.value = visibleImageOperations.includes(form.imageOperation) ? form.imageOperation : imageOperation.value
     replaceObject.value = form.replaceObject || ''
@@ -401,21 +417,30 @@ async function refresh(options = {}) {
     if (requestId !== configRequestId) return
     const activeApi = settings?.apis?.find((item) => item.id === settings.activeApiId)
     activeWorkspaceName.value = activeApi?.name || ''
-    const [modelsResult, userTemplatesResult] = await Promise.allSettled([
-      getModels(),
-      getPromptTemplates()
-    ])
+    const modelsRequest = getModels()
+    const templatesRequest = getPromptTemplates()
+    const userTemplatesResult = await Promise.allSettled([templatesRequest]).then(([result]) => result)
+    if (requestId !== configRequestId) return
+    if (userTemplatesResult.status === 'fulfilled') presets.value = userTemplatesResult.value || []
+    else {
+      templateLoadError.value = userTemplatesResult.reason?.message || '提示词预设加载失败'
+      showMessage('error', templateLoadError.value)
+    }
+    normalizeConfigSelection()
+    const modelsResult = await Promise.allSettled([modelsRequest]).then(([result]) => result)
     if (requestId !== configRequestId) return
     if (modelsResult.status === 'fulfilled') {
       models.value = modelsResult.value || []
       const preferredModel = activeApi?.model && models.value.some((item) => item.id === activeApi.model) ? activeApi.model : ''
       model.value = preferredModel || (models.value.some((item) => item.id === model.value) ? model.value : models.value[0]?.id || '')
-      if (!models.value.length) modelLoadError.value = '当前工作台没有返回模型列表'
+      if (!models.value.length) {
+        modelLoadError.value = '当前工作台没有返回模型列表'
+        showMessage('warning', modelLoadError.value)
+      }
     } else {
       modelLoadError.value = modelsResult.reason?.message || '模型配置加载失败'
+      showMessage('error', modelLoadError.value)
     }
-    if (userTemplatesResult.status === 'fulfilled') presets.value = userTemplatesResult.value || []
-    else templateLoadError.value = userTemplatesResult.reason?.message || '提示词预设加载失败'
     normalizeConfigSelection()
   } finally {
     if (requestId === configRequestId) configLoading.value = false
@@ -438,6 +463,9 @@ async function startNewTask() {
   editParent.value = null;
   presetId.value = '';
   count.value = 1;
+  size.value = 'reference';
+  customWidth.value = null;
+  customHeight.value = null;
   error.value = '';
   completedCount.value = 0;
   generationTotal.value = 0;
@@ -465,7 +493,6 @@ function setMode(nextMode) {
   error.value = ''
   completedCount.value = 0
   presetId.value = ''
-  if (nextMode === 'text' && size.value === 'reference') size.value = '2048x2048'
 }
 
 function setImageOperation(nextOperation) {
@@ -571,6 +598,10 @@ function createGenerationWork() {
   }
   if (!model.value) {
     error.value = '请先选择生成模型';
+    return null
+  }
+  if (size.value === 'custom' && (!Number.isInteger(customWidth.value) || !Number.isInteger(customHeight.value))) {
+    error.value = '请选择自定义尺寸后填写宽度和高度';
     return null
   }
   if (!taskCount.value) {
@@ -812,7 +843,7 @@ async function continueEdit() {
     size.value = 'reference'
     presetId.value = ''
     selected.value = new Set()
-    ElMessage.success('已将选中样片设为编辑基础图')
+    showMessage('success', '已将选中样片设为编辑基础图')
   } catch (e) {
     error.value = e.message || '无法读取已选样片'
   } finally {
@@ -906,7 +937,7 @@ async function exportSelected() {
   error.value = ''
   try {
     const exported = await exportImages(urls, format.value)
-    ElMessage.success(`已导出 ${exported.count} 张图片到 ${exported.exportDir || '本地导出目录'}`)
+    showMessage('success', `已导出 ${exported.count} 张图片到 ${exported.exportDir || '本地导出目录'}`)
   } catch (e) {
     error.value = e.message || '导出图片失败'
   } finally {
@@ -1101,7 +1132,6 @@ onBeforeUnmount(() => {
             <div class="composer-heading">
               <h3>提示词</h3>
             </div>
-            <el-alert v-if="configStatusTitle" :title="configStatusTitle" :type="configStatusType" :closable="false" show-icon/>
             <div class="quick-controls" aria-label="常用生成设置">
               <el-form-item class="quick-control quick-model" label="模型">
                 <el-select v-model="model" class="studio-select" filterable allow-create default-first-option :placeholder="configLoading ? '正在加载模型...' : '选择模型，可直接输入模型 ID'" popper-class="studio-select-popper" clearable :loading="configLoading">
@@ -1109,7 +1139,6 @@ onBeforeUnmount(() => {
                     <div class="select-option"><span class="select-index">{{ String(index + 1).padStart(2, '0') }}</span><span><b>{{ item.id }}</b><small>{{ index === 0 ? '主力生成模型' : '备用生成模型' }}</small></span></div>
                   </el-option>
                 </el-select>
-                <small v-if="modelLoadError" class="config-inline-note">{{ modelLoadError }}，仍可手动刷新或重新选择。</small>
               </el-form-item>
               <el-button class="quick-refresh" text :icon="Refresh" title="刷新模型" aria-label="刷新模型" @click="refresh" :disabled="running"/>
               <el-form-item class="quick-control quick-preset" label="预设">
@@ -1118,11 +1147,10 @@ onBeforeUnmount(() => {
                     <div class="select-option"><span class="select-index">{{ String(index + 1).padStart(2, '0') }}</span><span><b>{{ item.name }}</b></span></div>
                   </el-option>
                 </el-select>
-                <small v-if="templateLoadError" class="config-inline-note">{{ templateLoadError }}，可继续手动选择已有预设。</small>
               </el-form-item>
               <el-form-item class="quick-control quick-size" label="尺寸">
                 <el-select v-model="size" class="studio-select" popper-class="studio-select-popper">
-                  <el-option label="根据目标图" value="reference"/><el-option label="2048 × 2048" value="2048x2048"/><el-option label="2560 × 1440" value="2560x1440"/><el-option label="1440 × 2560" value="1440x2560"/><el-option label="3024 × 1296" value="3024x1296"/><el-option label="自定义尺寸" value="custom"/>
+                  <el-option label="根据目标图" value="reference"/><el-option label="1024 × 1080" value="1024x1080"/><el-option label="2160 × 3840" value="2160x3840"/><el-option label="2160 × 3240" value="2160x3240"/><el-option label="自定义尺寸" value="custom"/>
                 </el-select>
               </el-form-item>
               <el-form-item class="quick-control quick-count" label="数量"><el-input-number v-model="count" :min="1" :max="10" controls-position="right"/></el-form-item>
@@ -1184,7 +1212,6 @@ onBeforeUnmount(() => {
                      @click="continueEdit">{{ preparingEdit ? '准备编辑图' : '继续编辑' }}</el-button>
         </div>
       </div>
-      <el-alert v-if="error" :title="error" type="error" show-icon/>
       <div v-if="!results.length" class="empty">暂无生成结果</div>
       <div v-else class="gallery">
         <div v-for="(item,index) in results" :key="item.id || index" class="result-card"
