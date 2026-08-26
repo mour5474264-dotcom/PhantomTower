@@ -30,6 +30,10 @@ export function notifyActiveApiChanged(activeApiId = '') {
     window.dispatchEvent(new CustomEvent('sample-factory-active-api-changed', {detail: {activeApiId}}))
 }
 
+export function notifyPromptTemplatesChanged() {
+    window.dispatchEvent(new Event('sample-factory-prompt-templates-changed'))
+}
+
 export async function getModels() {
     const data = await request('/api/models', undefined, '模型读取失败');
     return data.data || data.models || []

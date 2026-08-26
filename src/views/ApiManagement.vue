@@ -12,6 +12,18 @@ const status = ref('')
 const testingId = ref('')
 const blank = () => ({name: '', endpoint: '', key: '', provider: ''})
 const form = ref(blank())
+const formRef = ref()
+const requiredRule = (message) => ({
+  required: true,
+  whitespace: true,
+  message,
+  trigger: ['blur', 'change']
+})
+const formRules = {
+  name: [requiredRule('请输入名称')],
+  endpoint: [requiredRule('请输入地址')],
+  key: [requiredRule('请输入 API Key')]
+}
 
 async function persist() {
   await saveSettings({apis: profiles.value, activeApiId: activeId.value})
@@ -33,7 +45,8 @@ function openEdit(item) {
 }
 
 async function submit() {
-  if (!form.value.name || !form.value.endpoint || !form.value.key) return
+  const valid = await formRef.value?.validate().catch(() => false)
+  if (!valid) return
   if (editingId.value) Object.assign(profiles.value.find((item) => item.id === editingId.value), form.value)
   else {
     const item = {...form.value, id: crypto.randomUUID()};
@@ -118,14 +131,14 @@ async function test(item) {
       <el-empty v-else description="暂无中转站配置，请点击新增中转站"/>
     </div>
     <el-dialog v-model="dialog" :title="editingId ? '编辑中转站' : '新增中转站'" width="520px">
-      <el-form label-position="top">
-        <el-form-item label="名称">
+      <el-form ref="formRef" :model="form" :rules="formRules" label-position="top">
+        <el-form-item label="名称" prop="name" required>
           <el-input v-model="form.name" placeholder="输入名称如：主力"/>
         </el-form-item>
-        <el-form-item label="地址">
+        <el-form-item label="地址" prop="endpoint" required>
           <el-input v-model="form.endpoint" placeholder="请输入网站地址，如：https://chatgpt.com（无需填写 /v1 或接口路径）"/>
         </el-form-item>
-        <el-form-item label="API Key">
+        <el-form-item label="API Key" prop="key" required>
           <el-input v-model="form.key" type="password" show-password placeholder="请输入对应网址的apiKey"/>
         </el-form-item>
         <el-form-item label="协议（可选）">

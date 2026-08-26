@@ -1,5 +1,5 @@
 <script setup>
-import {ref, computed, onMounted, onBeforeUnmount, markRaw, watch} from 'vue'
+import {ref, computed, onMounted, onBeforeUnmount, onActivated, markRaw, watch} from 'vue'
 import {Delete, Upload, Refresh, VideoPlay, Download, SwitchButton} from '@element-plus/icons-vue'
 import {ElMessage} from 'element-plus'
 import {X, Plus, ImagePlus, PenLine} from 'lucide-vue-next'
@@ -42,7 +42,7 @@ const generationControllers = new Map()
 const activeGenerationWorks = new Set()
 const queuedCount = ref(0)
 const preview = ref('')
-const materials = ref({person: [], pose: [], prop: [], scene: [], reference: []})
+const materials = ref({person: [], pose: [], prop: [], scene: [], reference: [], batchReference: [], editReference: []})
 const mode = ref('text')
 const isTextMode = computed(() => mode.value === 'text')
 const imageOperation = ref('batch')
@@ -62,6 +62,7 @@ const HOME_MEMORY_VERSION = 1
 let restoringHomeMemory = true
 let persistHomeMemoryTimer = 0
 let configRequestId = 0
+let templateRequestId = 0
 
 function showMessage(type, message) {
   if (!message) return
@@ -161,7 +162,9 @@ const materialLabels = {
   prop: '道具',
   reference: '目标/构图',
   pose: '动作',
-  scene: '场景'
+  scene: '场景',
+  batchReference: '画面参考图',
+  editReference: '编辑参考图'
 }
 const results = ref([]);
 const selected = ref(new Set())
@@ -223,14 +226,16 @@ function normalizeConfigSelection() {
 }
 materialTypes.push({key: 'scene', label: '背景参考', step: '可选', hint: '用于影响每张目标图的背景与环境', limit: 30})
 materialTypes.push({key: 'pose', label: '动作模仿', step: '可选', hint: '上传后优先模仿动作与身体朝向；未上传则沿用目标图动作', limit: 1})
+materialTypes.push({key: 'batchReference', label: '画面参考图', step: '可选', hint: '用于统一参考色调、道具或画面氛围；请在提示词中说明要借用什么', limit: 1})
+materialTypes.push({key: 'editReference', label: '编辑参考图', step: '可选', hint: '用于参考指定道具、材质或画面风格；请在提示词中说明要借用什么', limit: 1})
 const activeMaterialTypes = computed(() => {
   const keys = {
-    batch: ['person', 'reference', 'pose', 'scene', 'prop'],
+    batch: ['person', 'reference', 'batchReference', 'pose', 'scene', 'prop'],
     'three-view': ['reference'],
     fusion: ['person', 'reference', 'scene', 'prop'],
     background: ['reference', 'scene'],
     prop: ['reference', 'prop'],
-    edit: ['reference']
+    edit: ['reference', 'editReference']
   }[imageOperation.value] || []
   return materialTypes.filter((item) => keys.includes(item.key))
 })
@@ -351,7 +356,10 @@ function scheduleHomeMemoryPersist() {
 }
 
 function referenceRole(key) {
-  return key === 'reference' ? 'target_reference' : `${key}_reference`
+  if (key === 'reference') return 'target_reference'
+  if (key === 'batchReference') return 'visual_reference'
+  if (key === 'editReference') return 'edit_reference'
+  return `${key}_reference`
 }
 
 function referencePromptLabel(key) {
@@ -360,14 +368,16 @@ function referencePromptLabel(key) {
     reference: '目标图/构图图',
     prop: '道具图',
     scene: '场景参考图',
-    pose: '动作参考图'
+    pose: '动作参考图',
+    batchReference: '画面参考图',
+    editReference: '编辑参考图'
   })[key] || '参考图'
 }
 
 async function buildLabeledReferences(task, materialSet = materials.value) {
   if (task?.type === 'text') return []
   const labeled = []
-  const materialOrder = task.materialKeys || ['person', 'reference', 'pose', 'prop', 'scene']
+  const materialOrder = task.materialKeys || ['person', 'reference', 'batchReference', 'pose', 'prop', 'scene', 'editReference']
   for (const key of materialOrder) {
     const items = key === 'reference' && task.item ? [task.item] : materialSet[key]
     for (const item of items) {
@@ -388,7 +398,7 @@ async function buildLabeledReferences(task, materialSet = materials.value) {
 function addFiles(key, upload) {
   const file = rawFile(upload);
   if (!file || !file.type?.startsWith('image/')) return;
-  const limit = key === 'person' ? 3 : key === 'pose' ? 1 : 30;
+  const limit = key === 'person' ? 3 : ['pose', 'batchReference', 'editReference'].includes(key) ? 1 : 30;
   if (materials.value[key].length >= limit) {
     error.value = `${materialLabels[key]}最多添加 ${limit} 张`;
     return;
@@ -418,11 +428,13 @@ async function refresh(options = {}) {
     const activeApi = settings?.apis?.find((item) => item.id === settings.activeApiId)
     activeWorkspaceName.value = activeApi?.name || ''
     const modelsRequest = getModels()
+    const templatesVersion = ++templateRequestId
     const templatesRequest = getPromptTemplates()
     const userTemplatesResult = await Promise.allSettled([templatesRequest]).then(([result]) => result)
     if (requestId !== configRequestId) return
-    if (userTemplatesResult.status === 'fulfilled') presets.value = userTemplatesResult.value || []
-    else {
+    if (userTemplatesResult.status === 'fulfilled' && templatesVersion === templateRequestId) {
+      presets.value = userTemplatesResult.value || []
+    } else if (templatesVersion === templateRequestId) {
       templateLoadError.value = userTemplatesResult.reason?.message || '提示词预设加载失败'
       showMessage('error', templateLoadError.value)
     }
@@ -495,6 +507,21 @@ function setMode(nextMode) {
   presetId.value = ''
 }
 
+async function refreshPromptTemplates() {
+  const requestId = ++templateRequestId
+  templateLoadError.value = ''
+  try {
+    const nextTemplates = await getPromptTemplates()
+    if (requestId !== templateRequestId) return
+    presets.value = nextTemplates || []
+    normalizeConfigSelection()
+  } catch (error) {
+    if (requestId !== templateRequestId) return
+    templateLoadError.value = error?.message || '提示词预设加载失败'
+    showMessage('error', templateLoadError.value)
+  }
+}
+
 function setImageOperation(nextOperation) {
   if (imageOperation.value === nextOperation) return
   imageOperation.value = nextOperation
@@ -520,7 +547,7 @@ function buildImageTasks() {
     return materials.value.reference.map((item, index) => ({
       // The target must be the first physical image: several image models use
       // the first input as the editing canvas despite the textual role labels.
-      item, type: 'reference', label: `逐张处理 ${index + 1}`, materialKeys: ['reference', 'person', 'pose', 'scene', 'prop']
+      item, type: 'reference', label: `逐张处理 ${index + 1}`, materialKeys: ['reference', 'batchReference', 'person', 'pose', 'scene', 'prop']
     }))
   }
   if (imageOperation.value === 'three-view') {
@@ -536,7 +563,7 @@ function buildImageTasks() {
     return [{item: target, type: 'background', label: '背景替换', materialKeys: ['reference', 'scene']}]
   }
   if (imageOperation.value === 'edit') {
-    return [{item: target, type: 'local-edit', label: '局部继续编辑', materialKeys: ['reference']}]
+    return [{item: target, type: 'local-edit', label: '局部继续编辑', materialKeys: ['reference', 'editReference']}]
   }
   return [{item: target, type: 'prop-replace', label: '道具替换', materialKeys: ['reference', 'prop']}]
 }
@@ -555,7 +582,7 @@ function imageValidationError() {
 function buildMaterialPrompt(labeled, taskType = 'text', taskLabel = '提示词变化', replaceObjectText = '', configuredRule = '') {
   if (!labeled.length) return '';
   const primary = labeled.find((item) => item.primary)
-  const manifest = ['提示词可直接使用“人物参考图”“目标图/构图图”“道具图”“场景参考图”“动作参考图”指代对应类别，无需使用图片序号。', '本次请求会同时发送以上全部参考图；本次主参考图是“' + (primary?.promptLabel || '无') + '”。当规则提到目标图、构图图或主参考图时，均以该图片为准。', ...labeled.map((item, index) => `图片${index + 1}：${item.promptLabel}${item.primary ? '（本次主参考图）' : ''}（${item.role}）`)].join('\n');
+  const manifest = ['提示词可直接使用“人物参考图”“目标图/构图图”“道具图”“场景参考图”“动作参考图”“画面参考图”或“编辑参考图”指代对应类别，无需使用图片序号。', '本次请求会同时发送以上全部参考图；本次主参考图是“' + (primary?.promptLabel || '无') + '”。当规则提到目标图、构图图或主参考图时，均以该图片为准。', ...labeled.map((item, index) => `图片${index + 1}：${item.promptLabel}${item.primary ? '（本次主参考图）' : ''}（${item.role}）`)].join('\n');
   const defaultRule = taskType === 'reference'
       ? '以主目标图为画面基础，保持其构图、动作、位置、遮挡和透视。人物参考图只提供人物身份与外观；如上传背景参考图，则将其环境、场景氛围和背景元素融入主目标图；如上传道具图，则将其作为画面中人物自然使用或呈现的道具。未上传的人物、背景或道具素材不作替换要求。'
       : taskType === 'pose'
@@ -578,9 +605,13 @@ function buildMaterialPrompt(labeled, taskType = 'text', taskLabel = '提示词�
       ? '动作模仿图是本次动作的唯一优先来源：严格模仿其中人物的姿势、肢体关系和身体朝向，但不得带入动作图人物的身份、脸部、服装、道具或背景；此时不要以目标图中的原动作覆盖动作模仿图。'
       : '未上传动作模仿图时，保持并参考目标图中的原有动作、肢体关系和身体朝向。',
     labeled.some((item) => item.role === 'scene_reference') && '背景参考图是必须使用的视觉来源：将背景图中可辨识的场景、地点、室内外环境、主要背景物体、色调和氛围融入主目标图背景，不得忽略或以无关背景替代。',
-    labeled.some((item) => item.role === 'prop_reference') && '道具图是必须使用的视觉来源：在主目标图中清晰呈现道具图里的主要道具，保留其可辨识的外形、材质、颜色和关键细节，并使其与人物或画面自然接触；不得省略、替换为其他道具或只保留相似概念。'
+    labeled.some((item) => item.role === 'prop_reference') && '道具图是必须使用的视觉来源：在主目标图中清晰呈现道具图里的主要道具，保留其可辨识的外形、材质、颜色和关键细节，并使其与人物或画面自然接触；不得省略、替换为其他道具或只保留相似概念。',
+    labeled.some((item) => item.role === 'visual_reference') && '画面参考图不是另一张待处理的目标图，也不得整张覆盖或合成到当前目标图。它只提供用户在补充提示词中明确指定的视觉特征，例如色调、光线、氛围、道具或材质。每一张目标图都应独立应用这些明确要求，同时保持各自未指定的主体、构图、位置、透视和内容不变；未明确要求时不得擅自借用参考图的其他主体或背景。'
   ].filter(Boolean).join('\n') : '';
-  const rule = [configuredRule, defaultRule, batchMaterialRule].filter(Boolean).join('\n\n');
+  const editReferenceRule = taskType === 'local-edit' && labeled.some((item) => item.role === 'edit_reference')
+      ? '编辑参考图不是第二张待编辑画布，也不得整张覆盖或合成到主参考图。它只提供用户在补充提示词中明确指定的内容或视觉特征，例如某个道具、花材、材质、色调、光线或氛围。只借用与明确要求有关的特征；未明确要求时不得使用它。若用户明确要求色调或光线调整，可在完成该要求所需范围内调整全图，同时保持主体、构图、空间关系和未指定内容不变。'
+      : '';
+  const rule = [configuredRule, defaultRule, batchMaterialRule, editReferenceRule].filter(Boolean).join('\n\n');
   return `【本次只处理一个任务：${taskLabel}】\n${manifest}\n\n【执行规则】\n${rule}`;
 }
 
@@ -957,6 +988,10 @@ function onActiveApiChanged() {
   void refresh()
 }
 
+function onPromptTemplatesChanged() {
+  void refreshPromptTemplates()
+}
+
 function onKeydown(event) {
   const tag = event.target?.tagName?.toLowerCase();
   if (event.key === 'Enter' && (event.ctrlKey || event.metaKey || tag !== 'textarea')) {
@@ -1024,6 +1059,8 @@ function startRailResize(event) {
 
 onMounted(() => window.addEventListener('keydown', onKeydown))
 onMounted(() => window.addEventListener('sample-factory-active-api-changed', onActiveApiChanged))
+onMounted(() => window.addEventListener('sample-factory-prompt-templates-changed', onPromptTemplatesChanged))
+onActivated(() => void refreshPromptTemplates())
 watch([
   model,
   modelMode,
@@ -1045,6 +1082,7 @@ watch([
 onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeydown)
   window.removeEventListener('sample-factory-active-api-changed', onActiveApiChanged)
+  window.removeEventListener('sample-factory-prompt-templates-changed', onPromptTemplatesChanged)
   window.clearTimeout(persistHomeMemoryTimer)
   promptResizeCleanup?.()
   railResizeCleanup?.()
@@ -1085,7 +1123,7 @@ onBeforeUnmount(() => {
                 </el-radio-group>
               </el-form-item>
               <p class="operation-hint">{{
-                  imageOperation === 'batch' ? '每张目标图独立生成。动作模仿图优先决定动作；未上传时沿用目标图动作。人物参考固定身份，背景和道具图可继续叠加。' : imageOperation === 'three-view' ? '每张上传图片独立生成一张三视图；可一次选择多张图片，生成后仍可继续添加并再次批量生成。' : imageOperation === 'fusion' ? '人物、主目标、背景和道具共同组成一个融合任务。' : imageOperation === 'background' ? '只使用主目标图和背景参考图，保留前景主体。' : imageOperation === 'prop' ? '只使用主目标图和道具参考图，指定画面中要替换的对象。' : '从结果中选择一张样片作为基础图，只描述需要修改的局部内容。'
+                  imageOperation === 'batch' ? '每张目标图独立生成。可选上传一张画面参考图，并在提示词中说明要统一借用的色调、道具或氛围；动作模仿图优先决定动作，人物参考固定身份。' : imageOperation === 'three-view' ? '每张上传图片独立生成一张三视图；可一次选择多张图片，生成后仍可继续添加并再次批量生成。' : imageOperation === 'fusion' ? '人物、主目标、背景和道具共同组成一个融合任务。' : imageOperation === 'background' ? '只使用主目标图和背景参考图，保留前景主体。' : imageOperation === 'prop' ? '只使用主目标图和道具参考图，指定画面中要替换的对象。' : '从结果中选择一张样片作为基础图；可选上传一张编辑参考图，并在提示词中说明要借用的道具、材质或色调。'
                 }}</p>
               <div v-for="item in activeMaterialTypes" :key="item.key" class="material-box"
                    :class="{ 'is-primary': item.required, 'has-files': materials[item.key].length }">
@@ -1097,7 +1135,8 @@ onBeforeUnmount(() => {
                   <span class="material-count">{{ materials[item.key].length }}<i>/ {{ item.limit }}</i></span>
                 </div>
                 <p>{{ item.hint }}</p>
-                <el-upload class="material-upload" drag action="#" :auto-upload="false" :show-file-list="false" multiple
+                <el-upload class="material-upload" drag action="#" :auto-upload="false" :show-file-list="false"
+                           :multiple="item.limit > 1"
                            accept="image/*"
                            @change="addFiles(item.key, $event)">
                   <div class="drop-zone">
@@ -1168,7 +1207,7 @@ onBeforeUnmount(() => {
               <el-form-item class="composer-prompt" :class="{ 'is-resizing': promptResizeActive }">
                 <el-input v-model="prompt" type="textarea" :rows="3"
                           :style="{ '--prompt-height': `${promptHeight}px` }"
-                          :placeholder="isTextMode ? '描述想生成的画面、主体、风格和光线' : (imageOperation === 'edit' ? '例如：只把人物外套改成深蓝色，其余画面保持不变' : '仅填写本次额外要求')"/>
+                          :placeholder="isTextMode ? '描述想生成的画面、主体、风格和光线' : (imageOperation === 'edit' ? '例如：将编辑参考图中的花替换到桌上花瓶中，其余画面保持不变' : (imageOperation === 'batch' ? '例如：参考画面参考图的色调和光线，调整每张目标图' : '仅填写本次额外要求'))"/>
               </el-form-item>
               <div class="task-action-bar">
                 <el-button class="clear-button" @click="clearCurrent">清空当前</el-button>

@@ -78,6 +78,7 @@ import './edit-region.css';
 import './generation-panel-layout.css';
 import './top-workspace-layout.css';
 import './composer-layout.css';
+import './secondary-pages.css';
 const router=createRouter({history:createWebHashHistory(),routes:[{path:'/',component:()=>import('./views/Workspace.vue')},{path:'/library',component:()=>import('./views/Library.vue')},{path:'/presets',component:()=>import('./views/Presets.vue')},{path:'/history',component:()=>import('./views/History.vue')},{path:'/apis',component:()=>import('./views/ApiManagement.vue')} ]});
 const app = createApp(App).use(createPinia()).use(router)
 const elementComponents = {

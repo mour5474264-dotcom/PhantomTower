@@ -5,7 +5,8 @@
       "endpoint": "https://image.cjyyswq.com",
       "key": "sk-XfOAUGC1JTXc2SBUUh7u7jkyrui3jBWGtvqTVU2cLy3J4p9M",
       "model": "",
-      "id": "741f4655-3561-4708-b4c6-56ad6a861af7"
+      "id": "741f4655-3561-4708-b4c6-56ad6a861af7",
+      "provider": ""
     },
     {
       "name": "toitoi",
@@ -20,11 +21,12 @@
       "id": "efcc6448-a030-4cdb-af0c-c76c63b196f0"
     },
     {
-      "name": "https://ohlao.cfd",
-      "endpoint": "https://ohlao.cfd",
+      "name": "ohlao",
+      "endpoint": "https://cfapi.ohlao.cfd",
       "key": "sk-1a4967e127e1be48c19eceb783f0783d4ec6612b19944f5ad0c5eb4b8d5c5bef",
-      "id": "4ea6bc5d-80ae-471e-9c76-9339eb5a168a"
+      "provider": "",
+      "id": "ff437634-9f28-442c-9257-82b5596ad45e"
     }
   ],
-  "activeApiId": "741f4655-3561-4708-b4c6-56ad6a861af7"
+  "activeApiId": "ff437634-9f28-442c-9257-82b5596ad45e"
 }

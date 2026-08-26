@@ -2,13 +2,24 @@
 import {computed, ref, onMounted} from 'vue'
 import {ElMessage, ElMessageBox} from 'element-plus'
 import {Plus, RotateCcw, Copy} from 'lucide-vue-next'
-import {getPromptTemplates, savePromptTemplates, getBuiltInPromptTemplates, saveBuiltInPromptTemplates, restoreDefaultBuiltInPromptTemplates, } from '../api'
+import {getPromptTemplates, savePromptTemplates, getBuiltInPromptTemplates, saveBuiltInPromptTemplates, restoreDefaultBuiltInPromptTemplates, notifyPromptTemplatesChanged} from '../api'
 
 const activeTab = ref('user')
 const templates = ref([])
 const dialog = ref(false)
 const editingId = ref('')
 const form = ref({name: '', systemPrompt: '', defaultNegativePrompt: ''})
+const formRef = ref()
+const requiredRule = (message) => ({
+  required: true,
+  whitespace: true,
+  message,
+  trigger: ['blur', 'change']
+})
+const formRules = computed(() => ({
+  name: [requiredRule('请输入预设名称')],
+  systemPrompt: [requiredRule(isBuiltIn.value ? '请输入内置提示词' : '请输入提示词内容')]
+}))
 
 const isBuiltIn = computed(() => activeTab.value === 'builtin')
 const title = computed(() => isBuiltIn.value ? '内置提示词预设' : '提示词预设')
@@ -48,7 +59,8 @@ function copyTemplate(item) {
 }
 
 async function save() {
-  if (!form.value.name.trim() || !form.value.systemPrompt.trim()) return ElMessage.warning('请填写预设名称和提示词内容')
+  const valid = await formRef.value?.validate().catch(() => false)
+  if (!valid) return
   const next = templates.value.map((item) => ({...item}))
   const existingTemplate = next.find((item) => item.id === editingId.value)
   const template = isBuiltIn.value
@@ -58,6 +70,7 @@ async function save() {
   else next.push({id: crypto.randomUUID(), ...template})
   try {
     templates.value = isBuiltIn.value ? await saveBuiltInPromptTemplates(next) : await savePromptTemplates(next)
+    if (!isBuiltIn.value) notifyPromptTemplatesChanged()
     dialog.value = false
     ElMessage.success('预设已保存')
   } catch (error) { ElMessage.error(error.message) }
@@ -68,6 +81,7 @@ async function remove(id) {
     await ElMessageBox.confirm('删除后将无法在创作台使用该预设。', '确认删除', {type: 'warning'})
     const next = templates.value.filter((item) => item.id !== id)
     templates.value = isBuiltIn.value ? await saveBuiltInPromptTemplates(next) : await savePromptTemplates(next)
+    if (!isBuiltIn.value) notifyPromptTemplatesChanged()
     ElMessage.success('预设已删除')
   } catch (error) { if (error !== 'cancel' && error !== 'close') ElMessage.error(error.message) }
 }
@@ -122,9 +136,9 @@ onMounted(async () => {
       <el-empty v-else :description="isBuiltIn ? '尚未配置内置提示词预设' : '暂无提示词预设'"/>
     </div>
     <el-dialog v-model="dialog" :title="editingId ? `编辑${title}` : `新增${title}`" width="680px">
-      <el-form label-position="top">
-        <el-form-item label="预设名称"><el-input v-model="form.name"/></el-form-item>
-        <el-form-item :label="isBuiltIn ? '内置提示词' : '提示词内容'"><el-input v-model="form.systemPrompt" type="textarea" :rows="6"/></el-form-item>
+      <el-form ref="formRef" :model="form" :rules="formRules" label-position="top">
+        <el-form-item label="预设名称" prop="name" required><el-input v-model="form.name"/></el-form-item>
+        <el-form-item :label="isBuiltIn ? '内置提示词' : '提示词内容'" prop="systemPrompt" required><el-input v-model="form.systemPrompt" type="textarea" :rows="6"/></el-form-item>
         <el-form-item label="默认负向提示词（可选）"><el-input v-model="form.defaultNegativePrompt" type="textarea" :rows="3"/></el-form-item>
       </el-form>
       <template #footer><el-button @click="dialog = false">取消</el-button><el-button type="primary" @click="save">保存</el-button></template>
