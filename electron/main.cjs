@@ -242,6 +242,19 @@ function syncBundledPromptTemplates(dataDir) {
   } catch {}
 }
 
+function migrateLegacyData(legacyDir, dataDir) {
+  if (path.resolve(legacyDir) === path.resolve(dataDir) || !fs.existsSync(legacyDir)) return
+  fs.mkdirSync(dataDir, { recursive: true })
+  // Older Windows builds stored settings and generated files beside the install.
+  // Copy only missing files so an existing user-data directory always wins.
+  for (const entry of fs.readdirSync(legacyDir, { withFileTypes: true })) {
+    const source = path.join(legacyDir, entry.name)
+    const target = path.join(dataDir, entry.name)
+    if (fs.existsSync(target)) continue
+    try { fs.cpSync(source, target, { recursive: true, force: false, errorOnExist: false }) } catch (error) { console.warn(`无法迁移旧数据 ${source}: ${error.message}`) }
+  }
+}
+
 async function waitForServer(expectedDataDir) {
   let lastError
   for (let attempt = 0; attempt < 50; attempt += 1) {
@@ -274,11 +287,10 @@ app.whenReady().then(async () => {
     : path.join(__dirname, '..', 'server', 'index.js')
   const serverCwd = app.isPackaged ? path.dirname(serverEntry) : path.join(__dirname, '..')
   const installDir = app.isPackaged ? path.dirname(process.execPath) : path.join(__dirname, '..')
-  // A macOS .app bundle is commonly installed under /Applications and is not
-  // writable by the current user. Keep runtime data outside that bundle.
-  const dataDir = process.platform === 'darwin'
-    ? path.join(app.getPath('userData'), 'data')
-    : path.join(installDir, 'data')
+  // Keep runtime data outside the install bundle/directory so updates never
+  // remove API settings, presets, history, or generated files.
+  const dataDir = path.join(app.getPath('userData'), 'data')
+  migrateLegacyData(path.join(installDir, 'data'), dataDir)
   // Keep the default export location in the application's data directory.
   let exportDir = path.join(dataDir, 'export')
   if (app.isPackaged) {
