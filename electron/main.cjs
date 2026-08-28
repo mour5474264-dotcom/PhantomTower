@@ -53,6 +53,7 @@ function setupAutoUpdate() {
   autoUpdater.autoDownload = true
   autoUpdater.autoInstallOnAppQuit = true
   autoUpdater.on('update-available', (info) => sendUpdate('available', { version: info.version, manual: false }))
+  autoUpdater.on('update-not-available', (info) => sendUpdate('not-available', info.version || app.getVersion()))
   autoUpdater.on('download-progress', (progress) => sendUpdate('progress', Math.round(progress.percent)))
   autoUpdater.on('update-downloaded', (info) => sendUpdate('downloaded', info.version))
   autoUpdater.on('error', (error) => sendUpdate('error', String(error?.message || error)))
