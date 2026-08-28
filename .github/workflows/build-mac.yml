@@ -36,14 +36,29 @@ jobs:
         run: npm run build:server
 
       - name: Build Intel Mac package
-        run: npx electron-builder --mac dmg zip --x64 --publish always
+        run: npx electron-builder --mac dmg zip --x64 --publish never
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build Apple Silicon package
-        run: npx electron-builder --mac dmg zip --arm64 --publish always
+        run: npx electron-builder --mac dmg zip --arm64 --publish never
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload macOS assets to the Windows-created release
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          for attempt in {1..30}; do
+            if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+              break
+            fi
+            echo "Waiting for Windows workflow to create ${GITHUB_REF_NAME} (attempt ${attempt}/30)..."
+            sleep 10
+          done
+          gh release upload "${GITHUB_REF_NAME}" release/* --clobber
+        env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

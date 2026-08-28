@@ -25,7 +25,8 @@
     "publish": {
       "provider": "github",
       "owner": "mour5474264-dotcom",
-      "repo": "PhantomTower"
+      "repo": "PhantomTower",
+      "releaseType": "release"
     },
     "electronDownload": {
       "mirror": "https://npmmirror.com/mirrors/electron/"
