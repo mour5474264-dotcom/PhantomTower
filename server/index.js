@@ -53,7 +53,11 @@ function publicApi(api) {
 }
 
 function publicSettings(settings) {
-    return {...settings, apis: Array.isArray(settings.apis) ? settings.apis.map(publicApi) : []}
+    return {
+        ...settings,
+        apis: Array.isArray(settings.apis) ? settings.apis.map(publicApi) : [],
+        storage: {...(settings.storage || {}), exportDir: settings.storage?.exportDir || exportDir}
+    }
 }
 
 function configuredExportDir(value) {

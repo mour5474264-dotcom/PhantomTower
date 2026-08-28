@@ -10,8 +10,8 @@
     "build": "vite build",
     "build:server": "vite build --config vite.server.config.js",
     "electron:dev": "npm run build && electron .",
-    "dist:win": "npm run build && npm run build:server && electron-builder --win nsis",
-    "dist:mac": "npm run build && npm run build:server && electron-builder --mac dmg",
+    "dist:win": "npm run build && npm run build:server && node scripts/patch-nsis-installer.cjs && electron-builder --win nsis",
+    "dist:mac": "npm run build && npm run build:server && electron-builder --mac dmg zip",
     "license:issue": "node cloudflare-api/scripts/license-manager-tencent.cjs issue",
     "license:revoke": "node cloudflare-api/scripts/license-manager-tencent.cjs revoke",
     "license:admin": "node cloudflare-api/scripts/license-admin-tencent.cjs"
@@ -22,10 +22,14 @@
     "directories": {
       "output": "release"
     },
+    "publish": {
+      "provider": "github",
+      "owner": "mour5474264-dotcom",
+      "repo": "PhantomTower"
+    },
     "electronDownload": {
       "mirror": "https://npmmirror.com/mirrors/electron/"
     },
-    "electronDist": "C:\\electron-local\\electron-v43.3.0-win32-x64",
     "files": [
       "web-dist/**/*",
       "electron/**/*",
@@ -54,7 +58,15 @@
       }
     ],
     "win": {
-      "target": "nsis"
+      "target": "nsis",
+      "icon": "build/icon/phantom-tower.ico"
+    },
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "artifactName": "phantom-tower-${version}-${arch}.${ext}"
     },
     "nsis": {
       "oneClick": false,
@@ -66,6 +78,7 @@
     "@element-plus/icons-vue": "^2.3.2",
     "@vitejs/plugin-vue": "latest",
     "archiver": "^8.0.0",
+    "electron-updater": "^6.8.9",
     "element-plus": "^2.14.4",
     "lucide-vue-next": "latest",
     "pinia": "latest",

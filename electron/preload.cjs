@@ -8,3 +8,16 @@ contextBridge.exposeInMainWorld('phantomTowerLicense', {
   chooseDirectory: () => ipcRenderer.invoke('dialog:choose-directory'),
   checkIntervalMinutes: licenseConfig.licenseCheckIntervalMinutes
 })
+
+contextBridge.exposeInMainWorld('phantomTowerUpdate', {
+  check: () => ipcRenderer.invoke('update:check'),
+  install: () => ipcRenderer.invoke('update:install'),
+  on: (callback) => {
+    const handlers = ['available', 'progress', 'downloaded', 'not-available', 'error'].map((type) => {
+      const handler = (_event, data) => callback({ type, data })
+      ipcRenderer.on(`update:${type}`, handler)
+      return [type, handler]
+    })
+    return () => handlers.forEach(([type, handler]) => ipcRenderer.removeListener(`update:${type}`, handler))
+  }
+})

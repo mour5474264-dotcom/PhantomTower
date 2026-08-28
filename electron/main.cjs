@@ -1,10 +1,63 @@
-const { app, BrowserWindow, dialog, utilityProcess, ipcMain, net, safeStorage } = require('electron')
+const { app, BrowserWindow, dialog, utilityProcess, ipcMain, net, safeStorage, shell } = require('electron')
+const { autoUpdater } = require('electron-updater')
 const fs = require('node:fs')
 const path = require('node:path')
 const crypto = require('node:crypto')
 const licenseConfig = require('./license-config.cjs')
 let serverProcess
 let serverExitCode = null
+let mainWindow = null
+let macUpdateUrl = null
+
+function sendUpdate(type, data) {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(`update:${type}`, data)
+}
+
+function compareVersions(a, b) {
+  const left = String(a).replace(/^v/i, '').split('.').map((part) => Number.parseInt(part, 10) || 0)
+  const right = String(b).replace(/^v/i, '').split('.').map((part) => Number.parseInt(part, 10) || 0)
+  for (let index = 0; index < 3; index += 1) {
+    if ((left[index] || 0) !== (right[index] || 0)) return (left[index] || 0) - (right[index] || 0)
+  }
+  return 0
+}
+
+async function checkMacUpdate() {
+  const response = await net.fetch('https://api.github.com/repos/mour5474264-dotcom/PhantomTower/releases/latest', {
+    headers: { accept: 'application/vnd.github+json', 'user-agent': 'PhantomTower-updater' }
+  })
+  if (!response.ok) throw new Error(`GitHub 更新检查失败（${response.status}）`)
+  const release = await response.json()
+  const version = String(release.tag_name || '').replace(/^v/i, '')
+  if (!version || compareVersions(version, app.getVersion()) <= 0) {
+    sendUpdate('not-available', app.getVersion())
+    return { updateInfo: null, version: app.getVersion() }
+  }
+  const arch = process.arch === 'arm64' ? 'arm64' : 'x64'
+  const assets = Array.isArray(release.assets) ? release.assets : []
+  const asset = assets.find((item) => item.name.endsWith('.dmg') && item.name.includes(`-${arch}.`))
+    || assets.find((item) => item.name.endsWith('.dmg'))
+  if (!asset) throw new Error('此 Release 没有可用的 macOS DMG')
+  macUpdateUrl = asset.browser_download_url
+  const info = { version, url: macUpdateUrl, manual: true, arch }
+  sendUpdate('available', info)
+  return { updateInfo: info }
+}
+
+function setupAutoUpdate() {
+  if (!app.isPackaged) return
+  if (process.platform === 'darwin') {
+    setTimeout(() => checkMacUpdate().catch((error) => sendUpdate('error', error.message)), 3000)
+    return
+  }
+  autoUpdater.autoDownload = true
+  autoUpdater.autoInstallOnAppQuit = true
+  autoUpdater.on('update-available', (info) => sendUpdate('available', { version: info.version, manual: false }))
+  autoUpdater.on('download-progress', (progress) => sendUpdate('progress', Math.round(progress.percent)))
+  autoUpdater.on('update-downloaded', (info) => sendUpdate('downloaded', info.version))
+  autoUpdater.on('error', (error) => sendUpdate('error', String(error?.message || error)))
+  setTimeout(() => autoUpdater.checkForUpdates().catch(() => {}), 3000)
+}
 
 function secretKeyPath() { return path.join(app.getPath('userData'), 'secrets.key') }
 function loadServerSecretKey() {
@@ -26,12 +79,14 @@ function loadServerSecretKey() {
 function createWindow() {
   const preload = path.join(__dirname, 'preload.cjs')
   if (!fs.existsSync(preload)) throw new Error(`授权 preload 文件不存在：${preload}`)
+  const icon = path.join(__dirname, 'icon', 'phantom-tower.ico')
   const win = new BrowserWindow({
     width: 1440,
     height: 920,
     minWidth: 1100,
     minHeight: 700,
     backgroundColor: '#f1eee7',
+    icon,
     webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: false, preload }
   })
   const indexFile = path.join(__dirname, '..', 'web-dist', 'index.html')
@@ -40,6 +95,7 @@ function createWindow() {
     console.error(message)
     dialog.showErrorBox('样片工厂页面加载失败', `${message}\n\n请查看 data/server.log 或重新安装应用。`)
   })
+  mainWindow = win
   win.loadFile(indexFile).catch((error) => {
     const message = `无法加载页面文件：${indexFile}\n${error.message}`
     console.error(message)
@@ -135,6 +191,21 @@ ipcMain.handle('dialog:choose-directory', async () => {
   const result = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] })
   return result.canceled ? '' : (result.filePaths[0] || '')
 })
+ipcMain.handle('update:check', () => {
+  if (!app.isPackaged) return { updateInfo: null, version: app.getVersion(), dev: true }
+  return process.platform === 'darwin' ? checkMacUpdate() : autoUpdater.checkForUpdates().catch((error) => {
+    sendUpdate('error', error.message)
+    return null
+  })
+})
+ipcMain.handle('update:install', async () => {
+  if (process.platform === 'darwin') {
+    if (!macUpdateUrl) throw new Error('请先检查更新')
+    await shell.openExternal(macUpdateUrl)
+    return { manual: true }
+  }
+  return autoUpdater.quitAndInstall()
+})
 
 function syncBundledPresets(dataDir) {
   const bundledFile = path.join(process.resourcesPath, 'data', 'presets.json')
@@ -207,22 +278,8 @@ app.whenReady().then(async () => {
   const dataDir = process.platform === 'darwin'
     ? path.join(app.getPath('userData'), 'data')
     : path.join(installDir, 'data')
-  // Older installers wrote this file before electron-builder finalized
-  // $INSTDIR, leaving it one directory above the executable. Read that legacy
-  // location once so existing installations keep their chosen export folder.
-  const exportPathFiles = [path.join(installDir, 'export-dir.txt'), path.join(path.dirname(installDir), 'export-dir.txt')]
-  // Keep the default export location next to the installed application.  Do not
-  // derive it from the server bundle or the process working directory.
+  // Keep the default export location in the application's data directory.
   let exportDir = path.join(dataDir, 'export')
-  for (const exportPathFile of exportPathFiles) {
-    try {
-      const configured = fs.readFileSync(exportPathFile, 'utf8').trim()
-      if (configured) {
-        exportDir = path.isAbsolute(configured) ? configured : path.resolve(installDir, configured)
-        break
-      }
-    } catch {}
-  }
   if (app.isPackaged) {
     syncBundledPresets(dataDir)
     syncBundledPromptTemplates(dataDir)
@@ -246,6 +303,7 @@ app.whenReady().then(async () => {
   try {
     await waitForServer(dataDir)
     createWindow()
+    setupAutoUpdate()
     app.on('activate', () => { if (!BrowserWindow.getAllWindows().length) createWindow() })
   } catch (error) {
     dialog.showErrorBox('PhantomTower 启动失败', `${error.message}\n\n日志：${logPath}`)

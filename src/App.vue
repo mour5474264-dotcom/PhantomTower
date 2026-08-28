@@ -123,7 +123,7 @@ onUnmounted(() => {
       <RouterLink to="/presets"><Settings2 :size="17" />提示词预设</RouterLink>
       <RouterLink to="/history"><History :size="17" />生成记录</RouterLink>
       <RouterLink to="/apis"><Server :size="17" />API 管理</RouterLink>
-<!--      <RouterLink to="/settings"><SlidersHorizontal :size="17" />设置中心</RouterLink>-->
+      <RouterLink to="/settings"><SlidersHorizontal :size="17" />设置中心</RouterLink>
     </nav>
     <div class="sidebar-meta api-switcher">
       <button type="button" class="api-switcher-button" :disabled="apiSwitching" :aria-expanded="showApiMenu" aria-haspopup="menu" @click="showApiMenu = !showApiMenu">
