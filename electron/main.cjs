@@ -255,6 +255,20 @@ function migrateLegacyData(legacyDir, dataDir) {
   }
 }
 
+function migrateLegacySecretKey(legacyDir) {
+  const target = secretKeyPath()
+  if (fs.existsSync(target)) return
+  const candidates = [path.join(legacyDir, 'secrets.key'), path.join(legacyDir, '..', 'secrets.key')]
+  for (const source of candidates) {
+    try {
+      if (!fs.existsSync(source)) continue
+      fs.mkdirSync(path.dirname(target), { recursive: true })
+      fs.copyFileSync(source, target)
+      return
+    } catch (error) { console.warn(`无法迁移旧加密密钥 ${source}: ${error.message}`) }
+  }
+}
+
 async function waitForServer(expectedDataDir) {
   let lastError
   for (let attempt = 0; attempt < 50; attempt += 1) {
@@ -290,6 +304,7 @@ app.whenReady().then(async () => {
   // Keep runtime data outside the install bundle/directory so updates never
   // remove API settings, presets, history, or generated files.
   const dataDir = path.join(app.getPath('userData'), 'data')
+  migrateLegacySecretKey(path.join(installDir, 'data'))
   migrateLegacyData(path.join(installDir, 'data'), dataDir)
   // Keep the default export location in the application's data directory.
   let exportDir = path.join(dataDir, 'export')
