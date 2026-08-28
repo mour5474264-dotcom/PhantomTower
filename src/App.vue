@@ -1,11 +1,11 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { RouterLink, RouterView } from 'vue-router'
-import { Images, Settings2, Server, History, ChevronDown } from 'lucide-vue-next'
+import { Images, Settings2, Server, History, SlidersHorizontal, ChevronDown } from 'lucide-vue-next'
 import { getSettings, saveSettings, notifyActiveApiChanged } from './api'
 
-const apiProfiles = ref(JSON.parse(localStorage.getItem('atelier-apis') || '[]'))
-const activeApiId = ref(localStorage.getItem('atelier-active-api') || '')
+const apiProfiles = ref([])
+const activeApiId = ref('')
 const showApiMenu = ref(false)
 const apiSwitching = ref(false)
 const apiSwitchError = ref('')
@@ -16,7 +16,6 @@ async function refreshApiProfiles() {
     const settings = await getSettings()
     apiProfiles.value = settings.apis || []
     activeApiId.value = settings.activeApiId || ''
-    localStorage.setItem('atelier-apis', JSON.stringify(apiProfiles.value))
     notifyActiveApiChanged(activeApiId.value)
   } catch (error) {
     apiSwitchError.value = error.message || '工作台配置读取失败'
@@ -124,6 +123,7 @@ onUnmounted(() => {
       <RouterLink to="/presets"><Settings2 :size="17" />提示词预设</RouterLink>
       <RouterLink to="/history"><History :size="17" />生成记录</RouterLink>
       <RouterLink to="/apis"><Server :size="17" />API 管理</RouterLink>
+<!--      <RouterLink to="/settings"><SlidersHorizontal :size="17" />设置中心</RouterLink>-->
     </nav>
     <div class="sidebar-meta api-switcher">
       <button type="button" class="api-switcher-button" :disabled="apiSwitching" :aria-expanded="showApiMenu" aria-haspopup="menu" @click="showApiMenu = !showApiMenu">

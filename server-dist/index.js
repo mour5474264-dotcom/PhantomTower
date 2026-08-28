@@ -21,7 +21,84 @@ var files = {
 };
 var activeGenerations = /* @__PURE__ */ new Map();
 var recordsWriteQueue = Promise.resolve();
-var imageGenerationTimeoutMs = 9e4;
+var secretKey = process.env.PHANTOMTOWER_SECRET_KEY || crypto.createHash("sha256").update("phantomtower-development-only").digest("hex");
+function encryptionKey() {
+	if (!/^[a-f0-9]{64}$/i.test(secretKey)) throw new Error("本地安全存储未初始化，请重启应用");
+	return Buffer.from(secretKey, "hex");
+}
+function encryptSecret(value) {
+	const iv = crypto.randomBytes(12);
+	const cipher = crypto.createCipheriv("aes-256-gcm", encryptionKey(), iv);
+	const encrypted = Buffer.concat([cipher.update(String(value), "utf8"), cipher.final()]);
+	return `v1:${iv.toString("base64")}:${cipher.getAuthTag().toString("base64")}:${encrypted.toString("base64")}`;
+}
+function decryptSecret(value) {
+	if (!value) return "";
+	if (!String(value).startsWith("v1:")) return String(value);
+	const [, ivText, tagText, dataText] = String(value).split(":");
+	const decipher = crypto.createDecipheriv("aes-256-gcm", encryptionKey(), Buffer.from(ivText, "base64"));
+	decipher.setAuthTag(Buffer.from(tagText, "base64"));
+	return Buffer.concat([decipher.update(Buffer.from(dataText, "base64")), decipher.final()]).toString("utf8");
+}
+function publicApi(api) {
+	if (!api) return api;
+	const { key, encryptedKey, ...safe } = api;
+	return {
+		...safe,
+		secretConfigured: Boolean(key || encryptedKey)
+	};
+}
+function publicSettings(settings) {
+	return {
+		...settings,
+		apis: Array.isArray(settings.apis) ? settings.apis.map(publicApi) : []
+	};
+}
+function configuredExportDir(value) {
+	const candidate = String(value || "").trim();
+	if (!candidate) return path.join(dataDir, "export");
+	if (!path.isAbsolute(candidate)) throw new Error("导出目录必须是绝对路径");
+	if (candidate === path.parse(candidate).root) throw new Error("不能使用磁盘根目录作为导出目录");
+	return path.resolve(candidate);
+}
+async function migrateSettings() {
+	const current = await read(files.settings, {
+		schemaVersion: 2,
+		apis: [],
+		activeApiId: "",
+		preferences: {},
+		storage: {}
+	});
+	let changed = false;
+	const apis = Array.isArray(current.apis) ? current.apis.map((api) => {
+		const next = { ...api };
+		if (next.key && !next.encryptedKey) {
+			next.encryptedKey = encryptSecret(next.key);
+			delete next.key;
+			changed = true;
+		}
+		if (!next.secretId) {
+			next.secretId = `api-${next.id || crypto.randomUUID()}`;
+			changed = true;
+		}
+		return next;
+	}) : [];
+	if (current.schemaVersion !== 2 || changed) {
+		if (changed) await write(`${files.settings}.migration-backup`, current);
+		await write(files.settings, {
+			...current,
+			schemaVersion: 2,
+			apis,
+			preferences: current.preferences || {},
+			storage: current.storage || {}
+		});
+	}
+	return {
+		...current,
+		schemaVersion: 2,
+		apis
+	};
+}
 function wait(ms) {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -124,19 +201,25 @@ async function savePromptTemplates(value, targetFile = files.promptTemplates) {
 }
 function send(res, status, data) {
 	if (res.destroyed) return;
+	const origin = res.req?.headers?.origin;
+	const allowedOrigin = !origin || origin === "null" || /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin) ? origin || "null" : "null";
 	res.writeHead(status, {
 		"Content-Type": "application/json",
-		"Access-Control-Allow-Origin": "*"
+		"Access-Control-Allow-Origin": allowedOrigin,
+		"Vary": "Origin"
 	});
 	res.end(JSON.stringify(data));
 }
 async function json(req) {
 	let value = "";
-	for await (const chunk of req) value += chunk;
+	for await (const chunk of req) {
+		value += chunk;
+		if (Buffer.byteLength(value, "utf8") > 26214400) throw new Error("请求内容过大");
+	}
 	return value ? JSON.parse(value) : {};
 }
 function apiUrl(endpoint, route) {
-	return `${String(endpoint || "").trim().replace(/\/+$/, "")}/v1/${String(route).replace(/^\/+/, "")}`;
+	return `${String(endpoint || "").trim().replace(/\/+$/, "").replace(/\/v1(?:\/.*)?$/i, "")}/v1/${String(route).replace(/^\/+/, "")}`;
 }
 function dataUrlFile(dataUrl, filename = "reference.png") {
 	const match = String(dataUrl || "").match(/^data:([^;]+);base64,(.+)$/s);
@@ -214,19 +297,10 @@ function upstreamFetchError(error, context, size = "") {
 	return `${context}网络连接失败${sizeText}。请检查网络、代理和中转站状态后重试。`;
 }
 async function fetchImageGeneration(url, options) {
-	const timeoutController = new AbortController();
-	const timeout = setTimeout(() => timeoutController.abort(), imageGenerationTimeoutMs);
-	try {
-		return await fetch(url, {
-			...options,
-			signal: AbortSignal.any([options.signal, timeoutController.signal])
-		});
-	} catch (error) {
-		if (timeoutController.signal.aborted) error.generationTimedOut = true;
-		throw error;
-	} finally {
-		clearTimeout(timeout);
-	}
+	return fetch(url, {
+		...options,
+		signal: options.signal
+	});
 }
 function appendGenerationRecord(record) {
 	recordsWriteQueue = recordsWriteQueue.catch(() => null).then(async () => {
@@ -253,11 +327,12 @@ function promptTemplateOperation(operation, mode) {
 	}[operation] || operation || (mode === "text" ? "text" : "all");
 }
 async function activeApi() {
-	const settings = await read(files.settings, {
-		apis: [],
-		activeApiId: ""
-	});
-	return settings.apis.find((item) => item.id === settings.activeApiId);
+	const settings = await migrateSettings();
+	const api = settings.apis.find((item) => item.id === settings.activeApiId);
+	return api ? {
+		...api,
+		key: decryptSecret(api.encryptedKey)
+	} : null;
 }
 async function fetchModels(api) {
 	if (!api?.endpoint || !api?.key) throw new Error("请填写 API 地址和 API Key");
@@ -275,6 +350,78 @@ async function fetchModels(api) {
 		status: response.status,
 		payload
 	};
+}
+async function detectConnection(api) {
+	if (!api?.endpoint || !api?.key) throw new Error("请填写 API 地址和 API Key");
+	const endpoint = String(api.endpoint).replace(/\/+$/, "");
+	const probes = [
+		{
+			provider: "openai",
+			protocol: "openai-images",
+			authType: "bearer",
+			imagePath: "/images/generations",
+			editPath: "/images/edits",
+			request: () => fetch(apiUrl(endpoint, "models"), { headers: { Authorization: `Bearer ${api.key}` } }),
+			models: (payload) => payload?.data || payload?.models || []
+		},
+		{
+			provider: "anthropic",
+			protocol: "anthropic-messages",
+			authType: "x-api-key",
+			imagePath: "/messages",
+			editPath: "/messages",
+			request: () => fetch(apiUrl(endpoint, "models"), { headers: {
+				"x-api-key": api.key,
+				"anthropic-version": "2023-06-01"
+			} }),
+			models: (payload) => payload?.data || payload?.models || []
+		},
+		{
+			provider: "gemini",
+			protocol: "gemini-generate-content",
+			authType: "query-key",
+			imagePath: "",
+			editPath: "",
+			request: () => fetch(`${endpoint.replace(/\/v1beta$|\/v1$|\/v1alpha$/i, "")}/v1beta/models?key=${encodeURIComponent(api.key)}`),
+			models: (payload) => (payload?.models || []).filter((item) => (item.supportedGenerationMethods || []).includes("generateContent"))
+		}
+	];
+	const requested = String(api.provider || "").toLowerCase();
+	const ordered = requested ? [...probes.filter((probe) => probe.provider === requested), ...probes.filter((probe) => probe.provider !== requested)] : probes;
+	const failures = [];
+	for (const probe of ordered) {
+		let response;
+		try {
+			response = await probe.request();
+			const payload = await upstreamJson(response, "模型接口");
+			if (!response.ok) {
+				failures.push(`${probe.provider}: HTTP ${response.status}`);
+				continue;
+			}
+			return {
+				status: 200,
+				payload: {
+					data: probe.models(payload).map((item) => typeof item === "string" ? {
+						id: item,
+						name: item
+					} : {
+						id: String(item.id || item.name || "").replace(/^models\//, ""),
+						name: item.display_name || item.displayName || item.id || item.name
+					}).filter((item) => item.id),
+					detection: {
+						...probe,
+						request: void 0,
+						models: void 0,
+						confidence: "verified",
+						testedAt: (/* @__PURE__ */ new Date()).toISOString()
+					}
+				}
+			};
+		} catch (error) {
+			failures.push(`${probe.provider}: ${error.message}`);
+		}
+	}
+	throw new Error(`无法识别中转站协议。已尝试 OpenAI、Anthropic 和 Gemini：${failures.join("；")}`);
 }
 function cacheKey(url) {
 	return crypto.createHash("sha256").update(url).digest("hex");
@@ -382,16 +529,11 @@ async function cachedImage(url) {
 async function cacheImage(url) {
 	const existing = await cachedImage(url);
 	if (existing) return existing;
-	const controller = new AbortController();
-	const timeout = setTimeout(() => controller.abort(), 2e4);
 	let response;
 	try {
-		response = await fetch(url, { signal: controller.signal });
+		response = await fetch(url);
 	} catch (error) {
-		if (error.name === "AbortError") throw new Error("image cache request timed out");
 		throw error;
-	} finally {
-		clearTimeout(timeout);
 	}
 	if (!response.ok) throw new Error(`image request failed: ${response.status}`);
 	const headerContentType = response.headers.get("content-type") || "image/png";
@@ -467,10 +609,15 @@ async function getDownloadImage(url) {
 }
 await repairStoredImageExtensions();
 http.createServer(async (req, res) => {
+	res.req = req;
 	if (req.method === "OPTIONS") {
+		const origin = req.headers.origin;
+		const allowedOrigin = !origin || origin === "null" || /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin) ? origin || "null" : "null";
 		res.writeHead(204, {
-			"Access-Control-Allow-Origin": "*",
-			"Access-Control-Allow-Headers": "Content-Type"
+			"Access-Control-Allow-Origin": allowedOrigin,
+			"Access-Control-Allow-Headers": "Content-Type",
+			"Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+			"Vary": "Origin"
 		});
 		return res.end();
 	}
@@ -480,6 +627,19 @@ http.createServer(async (req, res) => {
 			dataDir,
 			exportDir
 		});
+		if (req.url === "/api/cache/clear" && req.method === "POST") {
+			const entries = await fs.readdir(generatedDir, { withFileTypes: true }).catch(() => []);
+			let removed = 0;
+			for (const entry of entries) {
+				if (!entry.isFile()) continue;
+				await fs.rm(path.join(generatedDir, entry.name), { force: true });
+				removed += 1;
+			}
+			return send(res, 200, {
+				ok: true,
+				removed
+			});
+		}
 		if (req.url.startsWith("/api/generate/cancel") && req.method === "POST") {
 			const taskId = new URL(req.url, "http://127.0.0.1").searchParams.get("taskId");
 			const controller = taskId && activeGenerations.get(taskId);
@@ -489,17 +649,36 @@ http.createServer(async (req, res) => {
 				cancelled: Boolean(controller)
 			});
 		}
-		if (req.url === "/api/settings" && req.method === "GET") {
-			const { adminPassword, ...safeSettings } = await read(files.settings, {
-				apis: [],
-				activeApiId: ""
-			});
-			if (adminPassword !== void 0) await write(files.settings, safeSettings);
-			return send(res, 200, safeSettings);
-		}
+		if (req.url === "/api/settings" && req.method === "GET") return send(res, 200, publicSettings(await migrateSettings()));
 		if (req.url === "/api/settings" && req.method === "POST") {
-			const { adminPassword, ...next } = await json(req);
-			await write(files.settings, next);
+			const input = await json(req);
+			const current = await migrateSettings();
+			const apis = (Array.isArray(input.apis) ? input.apis : current.apis).map((api) => {
+				const previous = current.apis.find((item) => item.id === api.id);
+				const next = { ...api };
+				if (next.key) next.encryptedKey = encryptSecret(next.key);
+				else if (previous?.encryptedKey) next.encryptedKey = previous.encryptedKey;
+				delete next.key;
+				return {
+					...next,
+					secretId: next.secretId || previous?.secretId || `api-${next.id || crypto.randomUUID()}`
+				};
+			});
+			const nextStorage = input.storage || current.storage || {};
+			const nextExportDir = configuredExportDir(nextStorage.exportDir);
+			await fs.mkdir(nextExportDir, { recursive: true });
+			exportDir = nextExportDir;
+			await write(files.settings, {
+				...current,
+				schemaVersion: 2,
+				apis,
+				activeApiId: String(input.activeApiId ?? current.activeApiId ?? ""),
+				preferences: input.preferences || current.preferences || {},
+				storage: {
+					...nextStorage,
+					exportDir: nextExportDir
+				}
+			});
 			return send(res, 200, { ok: true });
 		}
 		if (req.url === "/api/presets" && req.method === "GET") {
@@ -542,7 +721,7 @@ http.createServer(async (req, res) => {
 				res.writeHead(200, {
 					"Content-Type": type,
 					"Cache-Control": "public, max-age=31536000",
-					"Access-Control-Allow-Origin": "*"
+					"Access-Control-Allow-Origin": "null"
 				});
 				return res.end(buffer);
 			} catch {
@@ -558,7 +737,7 @@ http.createServer(async (req, res) => {
 			res.writeHead(200, {
 				"Content-Type": image.contentType || "application/octet-stream",
 				"Content-Disposition": `attachment; filename="${filename}"`,
-				"Access-Control-Allow-Origin": "*"
+				"Access-Control-Allow-Origin": "null"
 			});
 			return res.end(image.buffer);
 		}
@@ -617,7 +796,45 @@ http.createServer(async (req, res) => {
 			return send(res, result.status, result.payload);
 		}
 		if (req.url === "/api/models/test" && req.method === "POST") {
-			const result = await fetchModels(await json(req));
+			const input = await json(req);
+			const settings = await migrateSettings();
+			const stored = settings.apis.find((item) => item.id === input.id);
+			const api = {
+				...stored,
+				...input,
+				key: input.key || decryptSecret(stored?.encryptedKey)
+			};
+			const result = await detectConnection(api);
+			if (result.status === 200 && api.id) {
+				const detection = result.payload.detection;
+				const models = result.payload.data || [];
+				const nextApis = settings.apis.map((item) => item.id === api.id ? {
+					...item,
+					provider: detection.provider,
+					detectedRoute: {
+						provider: detection.provider,
+						protocol: detection.protocol,
+						authType: detection.authType,
+						imagePath: detection.imagePath,
+						editPath: detection.editPath,
+						confidence: detection.confidence,
+						testedAt: detection.testedAt
+					},
+					modelRoutes: Object.fromEntries(models.map((model) => [model.id, {
+						provider: detection.provider,
+						protocol: detection.protocol,
+						authType: detection.authType,
+						imagePath: detection.imagePath,
+						editPath: detection.editPath,
+						confidence: detection.confidence,
+						testedAt: detection.testedAt
+					}]))
+				} : item);
+				await write(files.settings, {
+					...settings,
+					apis: nextApis
+				});
+			}
 			return send(res, result.status, result.payload);
 		}
 		if (req.url === "/api/generate" && req.method === "POST") {
@@ -682,6 +899,7 @@ http.createServer(async (req, res) => {
 				const activeTaskId = String(input.taskId || crypto.randomUUID());
 				activeGenerations.set(activeTaskId, controller);
 				let response;
+				let result;
 				let responseProvider = provider;
 				try {
 					response = await fetchImageGeneration(provider === "gemini" ? geminiUrl(api, input.model) : apiUrl(api.endpoint, imagePath), {
@@ -699,7 +917,6 @@ http.createServer(async (req, res) => {
 				} finally {
 					activeGenerations.delete(activeTaskId);
 				}
-				let result;
 				try {
 					result = await upstreamJson(response, `${provider} 图片接口`);
 				} catch (error) {

@@ -1,11 +1,11 @@
 <script setup>
-import {ref} from 'vue'
+import {onMounted, ref} from 'vue'
 import {ElMessage} from 'element-plus'
 import {Plus, Trash2, CheckCircle2, Wifi, Edit3} from 'lucide-vue-next'
-import {saveSettings, testApiConnection, notifyActiveApiChanged} from '../api'
+import {getSettings, saveSettings, testApiConnection, notifyActiveApiChanged} from '../api'
 
-const profiles = ref(JSON.parse(localStorage.getItem('atelier-apis') || '[]'))
-const activeId = ref(localStorage.getItem('atelier-active-api') || '')
+const profiles = ref([])
+const activeId = ref('')
 const dialog = ref(false)
 const editingId = ref('')
 const status = ref('')
@@ -22,12 +22,14 @@ const requiredRule = (message) => ({
 const formRules = {
   name: [requiredRule('请输入名称')],
   endpoint: [requiredRule('请输入地址')],
-  key: [requiredRule('请输入 API Key')]
+  key: []
 }
 
 async function persist() {
   await saveSettings({apis: profiles.value, activeApiId: activeId.value})
-  localStorage.setItem('atelier-apis', JSON.stringify(profiles.value))
+  const settings = await getSettings()
+  profiles.value = settings.apis || []
+  activeId.value = settings.activeApiId || ''
   notifyActiveApiChanged(activeId.value)
   window.dispatchEvent(new CustomEvent('sample-factory-settings-changed'))
 }
@@ -40,14 +42,21 @@ function openCreate() {
 
 function openEdit(item) {
   editingId.value = item.id;
-  form.value = {...item};
+  form.value = {...item, key: ''};
   dialog.value = true
 }
 
 async function submit() {
   const valid = await formRef.value?.validate().catch(() => false)
   if (!valid) return
-  if (editingId.value) Object.assign(profiles.value.find((item) => item.id === editingId.value), form.value)
+  if (!editingId.value && !form.value.key.trim()) {
+    ElMessage.error('请输入 API Key')
+    return
+  }
+  if (editingId.value) {
+    const target = profiles.value.find((item) => item.id === editingId.value)
+    Object.assign(target, {...form.value, key: form.value.key || undefined})
+  }
   else {
     const item = {...form.value, id: crypto.randomUUID()};
     profiles.value.push(item);
@@ -85,14 +94,52 @@ async function test(item) {
   if (testingId.value) return
   testingId.value = item.id;
   try {
-    const models = await testApiConnection(item);
-    ElMessage.success(`连接成功，读取到 ${models.length} 个模型`)
+    const result = await testApiConnection(item);
+    const models = result.models || []
+    const detection = result.detection
+    const protocol = detection?.protocol || item.provider || 'openai-images'
+    ElMessage.success(`连接成功，识别为 ${protocol}，读取到 ${models.length} 个模型`)
+    const target = profiles.value.find((profile) => profile.id === item.id)
+    if (target && detection) {
+      Object.assign(target, {
+        provider: detection.provider,
+        detectedRoute: {
+          provider: detection.provider,
+          protocol: detection.protocol,
+          authType: detection.authType,
+          imagePath: detection.imagePath,
+          editPath: detection.editPath,
+          confidence: detection.confidence,
+          testedAt: detection.testedAt
+        },
+        modelRoutes: Object.fromEntries(models.map((model) => [model.id, {
+          provider: detection.provider,
+          protocol: detection.protocol,
+          authType: detection.authType,
+          imagePath: detection.imagePath,
+          editPath: detection.editPath,
+          confidence: detection.confidence,
+          testedAt: detection.testedAt
+        }]))
+      })
+      await persist()
+    }
   } catch (e) {
     ElMessage.error(`连接失败：${e.message}`)
   } finally {
     testingId.value = ''
   }
 }
+
+onMounted(async () => {
+  try {
+    const settings = await getSettings()
+    profiles.value = settings.apis || []
+    activeId.value = settings.activeApiId || ''
+  } catch (error) {
+    ElMessage.error(error.message)
+  }
+})
 </script>
 
 <template>
@@ -114,6 +161,12 @@ async function test(item) {
         <el-table-column prop="endpoint" label="接口地址" min-width="280" show-overflow-tooltip/>
         <el-table-column label="默认模型" min-width="160">
           <template #default="{ row }">{{ row.model || '自动读取' }}</template>
+        </el-table-column>
+        <el-table-column label="自动识别" min-width="190">
+          <template #default="{ row }">
+            <span v-if="row.detectedRoute">{{ row.detectedRoute.protocol }} · {{ row.detectedRoute.imagePath || '原生接口' }}</span>
+            <span v-else class="muted">未测试</span>
+          </template>
         </el-table-column>
         <el-table-column label="启用" width="100">
           <template #default="{ row }">
@@ -138,13 +191,14 @@ async function test(item) {
         <el-form-item label="地址" prop="endpoint" required>
           <el-input v-model="form.endpoint" placeholder="请输入网站地址，如：https://chatgpt.com（无需填写 /v1 或接口路径）"/>
         </el-form-item>
-        <el-form-item label="API Key" prop="key" required>
-          <el-input v-model="form.key" type="password" show-password placeholder="请输入对应网址的apiKey"/>
+        <el-form-item label="API Key" prop="key" :required="!editingId">
+          <el-input v-model="form.key" type="password" show-password :placeholder="editingId ? '留空表示保持当前密钥不变' : '请输入对应网址的apiKey'"/>
         </el-form-item>
         <el-form-item label="协议（可选）">
           <el-select v-model="form.provider" clearable placeholder="自动识别" style="width: 100%">
             <el-option label="自动识别" value=""/>
             <el-option label="OpenAI 兼容协议" value="openai"/>
+            <el-option label="Anthropic Messages 协议" value="anthropic"/>
             <el-option label="Google Gemini 原生协议" value="gemini"/>
           </el-select>
         </el-form-item>

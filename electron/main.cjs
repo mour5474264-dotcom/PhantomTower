@@ -1,10 +1,27 @@
-const { app, BrowserWindow, dialog, utilityProcess, ipcMain, net } = require('electron')
+const { app, BrowserWindow, dialog, utilityProcess, ipcMain, net, safeStorage } = require('electron')
 const fs = require('node:fs')
 const path = require('node:path')
 const crypto = require('node:crypto')
 const licenseConfig = require('./license-config.cjs')
 let serverProcess
 let serverExitCode = null
+
+function secretKeyPath() { return path.join(app.getPath('userData'), 'secrets.key') }
+function loadServerSecretKey() {
+  if (!safeStorage.isEncryptionAvailable()) throw new Error('系统安全存储不可用，无法安全保存 API Key')
+  const target = secretKeyPath()
+  try {
+    const encrypted = fs.readFileSync(target, 'utf8')
+    const key = safeStorage.decryptString(Buffer.from(encrypted, 'base64'))
+    if (/^[a-f0-9]{64}$/i.test(key)) return key
+  } catch {}
+  const key = crypto.randomBytes(32).toString('hex')
+  fs.mkdirSync(path.dirname(target), { recursive: true })
+  const temporary = `${target}.${process.pid}.tmp`
+  fs.writeFileSync(temporary, safeStorage.encryptString(key).toString('base64'), 'utf8')
+  fs.renameSync(temporary, target)
+  return key
+}
 
 function createWindow() {
   const preload = path.join(__dirname, 'preload.cjs')
@@ -114,6 +131,10 @@ ipcMain.handle('license:clear', () => {
   writeLicenseState({ deviceId: state.deviceId })
   return { state: 'needs_activation', message: '请输入许可证以激活本机' }
 })
+ipcMain.handle('dialog:choose-directory', async () => {
+  const result = await dialog.showOpenDialog({ properties: ['openDirectory', 'createDirectory'] })
+  return result.canceled ? '' : (result.filePaths[0] || '')
+})
 
 function syncBundledPresets(dataDir) {
   const bundledFile = path.join(process.resourcesPath, 'data', 'presets.json')
@@ -209,6 +230,7 @@ app.whenReady().then(async () => {
   fs.mkdirSync(dataDir, { recursive: true })
   fs.mkdirSync(exportDir, { recursive: true })
   const serverEnv = { ...process.env, PHANTOMTOWER_DATA_DIR: dataDir, PHANTOMTOWER_EXPORT_DIR: exportDir }
+  serverEnv.PHANTOMTOWER_SECRET_KEY = loadServerSecretKey()
   const logPath = path.join(dataDir, 'server.log')
   const log = fs.createWriteStream(logPath, { flags: 'a' })
   serverExitCode = null

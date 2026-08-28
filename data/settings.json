@@ -3,30 +3,81 @@
     {
       "name": "主力",
       "endpoint": "https://image.cjyyswq.com",
-      "key": "sk-XfOAUGC1JTXc2SBUUh7u7jkyrui3jBWGtvqTVU2cLy3J4p9M",
       "model": "",
       "id": "741f4655-3561-4708-b4c6-56ad6a861af7",
-      "provider": ""
+      "provider": "anthropic",
+      "secretId": "api-741f4655-3561-4708-b4c6-56ad6a861af7",
+      "secretConfigured": true,
+      "detectedRoute": {
+        "provider": "anthropic",
+        "protocol": "anthropic-messages",
+        "authType": "x-api-key",
+        "imagePath": "/messages",
+        "editPath": "/messages",
+        "confidence": "verified",
+        "testedAt": "2026-08-28T00:48:53.236Z"
+      },
+      "modelRoutes": {
+        "gpt-image-2-1k": {
+          "provider": "anthropic",
+          "protocol": "anthropic-messages",
+          "authType": "x-api-key",
+          "imagePath": "/messages",
+          "editPath": "/messages",
+          "confidence": "verified",
+          "testedAt": "2026-08-28T00:48:53.236Z"
+        },
+        "gpt-image-2": {
+          "provider": "anthropic",
+          "protocol": "anthropic-messages",
+          "authType": "x-api-key",
+          "imagePath": "/messages",
+          "editPath": "/messages",
+          "confidence": "verified",
+          "testedAt": "2026-08-28T00:48:53.236Z"
+        },
+        "gpt-image-2-full": {
+          "provider": "anthropic",
+          "protocol": "anthropic-messages",
+          "authType": "x-api-key",
+          "imagePath": "/messages",
+          "editPath": "/messages",
+          "confidence": "verified",
+          "testedAt": "2026-08-28T00:48:53.236Z"
+        }
+      },
+      "encryptedKey": "v1:y1Dvxa7L8EJP7sE4:4v+3KsfV1ZjAwU8g5OPgVA==:OqTPnHCQ73MR0ORvnB6j2ZDruHWW4NZcytYo3gnpzEj+ejjsTHlmg4HHRLmZAM+cFQFM"
     },
     {
       "name": "toitoi",
       "endpoint": "https://api-c.reqtoken.com",
-      "key": "sk-9b9462a2af3423fb20907ee697f8681f0f87a02521c8e5cab0a1a77c4603df68",
-      "id": "5695957d-c2c9-4561-87a4-56464f48f098"
+      "id": "5695957d-c2c9-4561-87a4-56464f48f098",
+      "secretId": "api-5695957d-c2c9-4561-87a4-56464f48f098",
+      "secretConfigured": true,
+      "encryptedKey": "v1:82wjHQqtc5NGqQ0m:2GUhaeEtf4i0gI6ZpY/iEw==:NNTd1Vxv+IY9pnu3w6ygW5TmZzTG0TF59ET5GEhrt9xy81f1FuoH8YrBj7WvzxNgHHAikZG3AR3pDryMRTS3zVAsvw=="
     },
     {
       "name": "11",
       "endpoint": "https://www.cun.ai",
-      "key": "sk-Yf4jBhEJpVXKl6wTUIkhsB6N9zHCoem9pOQst7eYPu0LCcx1",
-      "id": "efcc6448-a030-4cdb-af0c-c76c63b196f0"
+      "id": "efcc6448-a030-4cdb-af0c-c76c63b196f0",
+      "secretId": "api-efcc6448-a030-4cdb-af0c-c76c63b196f0",
+      "secretConfigured": true,
+      "encryptedKey": "v1:pBJar6FREfzekYpv:Q7QFX4HRI5U7t3WBqwV9uQ==:aY+T6bbxdDKZJvAEq4/auQ5Q9elrSrTFqBeo8tcey+Y/SkE0e2WNzeBH8QLNZrvPLqQU"
     },
     {
       "name": "ohlao",
       "endpoint": "https://cfapi.ohlao.cfd",
-      "key": "sk-1a4967e127e1be48c19eceb783f0783d4ec6612b19944f5ad0c5eb4b8d5c5bef",
       "provider": "",
-      "id": "ff437634-9f28-442c-9257-82b5596ad45e"
+      "id": "ff437634-9f28-442c-9257-82b5596ad45e",
+      "secretId": "api-ff437634-9f28-442c-9257-82b5596ad45e",
+      "secretConfigured": true,
+      "encryptedKey": "v1:whdEls2/Jr3YoeCI:ZdXxrfSS9fy5zch2QK2M/w==:pWdZhrsmj/udeq1rQOYFv+BsS19S2WTMsnCuEu8pcchPOsf0I19XZoxn9JAWyEKsjtEm4efGOiwwLsC/lKYwTN+U8A=="
     }
   ],
-  "activeApiId": "ff437634-9f28-442c-9257-82b5596ad45e"
+  "activeApiId": "741f4655-3561-4708-b4c6-56ad6a861af7",
+  "schemaVersion": 2,
+  "preferences": {},
+  "storage": {
+    "exportDir": "D:\\AManager\\code\\PhantomTower\\data\\export"
+  }
 }

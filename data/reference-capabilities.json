@@ -1,0 +1,214 @@
+{
+  "https://image.cjyyswq.com::gpt-image-2-1k::json-images": {
+    "endpoint": "https://image.cjyyswq.com",
+    "model": "gpt-image-2-1k",
+    "format": "json-images",
+    "attempts": [
+      {
+        "startedAt": "2026-08-17T01:03:04.066Z",
+        "format": "json-images",
+        "model": "gpt-image-2-1k",
+        "imageCount": 3,
+        "status": 200,
+        "ok": true,
+        "imageTokens": 19689,
+        "usage": {
+          "input_tokens": 19707,
+          "input_tokens_details": {
+            "image_tokens": 19689,
+            "text_tokens": 18
+          },
+          "output_tokens": 6563,
+          "output_tokens_details": {
+            "image_tokens": 6563,
+            "text_tokens": 0
+          },
+          "total_tokens": 26270
+        },
+        "response": {
+          "background": "opaque",
+          "created": 1786928661,
+          "data": [
+            {
+              "revised_prompt": "生成一张测试图片，保留参考图主体特征",
+              "url": "https://image.cjyyswq.com/uploads/2026/08/17/786199d5057146b99dd3f682ad43db0e.png"
+            }
+          ],
+          "moderation": "auto",
+          "output_format": "png",
+          "quality": "auto",
+          "size": "1023x1537",
+          "usage": {
+            "input_tokens": 19707,
+            "input_tokens_details": {
+              "image_tokens": 19689,
+              "text_tokens": 18
+            },
+            "output_tokens": 6563,
+            "output_tokens_details": {
+              "image_tokens": 6563,
+              "text_tokens": 0
+            },
+            "total_tokens": 26270
+          }
+        }
+      }
+    ],
+    "last": {
+      "startedAt": "2026-08-17T01:03:04.066Z",
+      "format": "json-images",
+      "model": "gpt-image-2-1k",
+      "imageCount": 3,
+      "status": 200,
+      "ok": true,
+      "imageTokens": 19689,
+      "usage": {
+        "input_tokens": 19707,
+        "input_tokens_details": {
+          "image_tokens": 19689,
+          "text_tokens": 18
+        },
+        "output_tokens": 6563,
+        "output_tokens_details": {
+          "image_tokens": 6563,
+          "text_tokens": 0
+        },
+        "total_tokens": 26270
+      },
+      "response": {
+        "background": "opaque",
+        "created": 1786928661,
+        "data": [
+          {
+            "revised_prompt": "生成一张测试图片，保留参考图主体特征",
+            "url": "https://image.cjyyswq.com/uploads/2026/08/17/786199d5057146b99dd3f682ad43db0e.png"
+          }
+        ],
+        "moderation": "auto",
+        "output_format": "png",
+        "quality": "auto",
+        "size": "1023x1537",
+        "usage": {
+          "input_tokens": 19707,
+          "input_tokens_details": {
+            "image_tokens": 19689,
+            "text_tokens": 18
+          },
+          "output_tokens": 6563,
+          "output_tokens_details": {
+            "image_tokens": 6563,
+            "text_tokens": 0
+          },
+          "total_tokens": 26270
+        }
+      }
+    },
+    "supported": true
+  },
+  "https://image.cjyyswq.com::gpt-image-2-1k::multipart-image-array": {
+    "endpoint": "https://image.cjyyswq.com",
+    "model": "gpt-image-2-1k",
+    "format": "multipart-image-array",
+    "attempts": [
+      {
+        "startedAt": "2026-08-17T01:09:03.509Z",
+        "format": "multipart-image-array",
+        "model": "gpt-image-2-1k",
+        "imageCount": 4,
+        "status": 200,
+        "ok": true,
+        "imageTokens": 26252,
+        "usage": {
+          "input_tokens": 26270,
+          "input_tokens_details": {
+            "image_tokens": 26252,
+            "text_tokens": 18
+          },
+          "output_tokens": 6563,
+          "output_tokens_details": {
+            "image_tokens": 6563,
+            "text_tokens": 0
+          },
+          "total_tokens": 32833
+        },
+        "response": {
+          "background": "opaque",
+          "created": 1786929023,
+          "data": [
+            {
+              "revised_prompt": "生成一张测试图片，保留参考图主体特征",
+              "url": "https://image.cjyyswq.com/uploads/2026/08/17/e1585feab3b64ac5b21e3c89d7d4bbee.png"
+            }
+          ],
+          "moderation": "auto",
+          "output_format": "png",
+          "quality": "auto",
+          "size": "1042x1510",
+          "usage": {
+            "input_tokens": 26270,
+            "input_tokens_details": {
+              "image_tokens": 26252,
+              "text_tokens": 18
+            },
+            "output_tokens": 6563,
+            "output_tokens_details": {
+              "image_tokens": 6563,
+              "text_tokens": 0
+            },
+            "total_tokens": 32833
+          }
+        }
+      }
+    ],
+    "last": {
+      "startedAt": "2026-08-17T01:09:03.509Z",
+      "format": "multipart-image-array",
+      "model": "gpt-image-2-1k",
+      "imageCount": 4,
+      "status": 200,
+      "ok": true,
+      "imageTokens": 26252,
+      "usage": {
+        "input_tokens": 26270,
+        "input_tokens_details": {
+          "image_tokens": 26252,
+          "text_tokens": 18
+        },
+        "output_tokens": 6563,
+        "output_tokens_details": {
+          "image_tokens": 6563,
+          "text_tokens": 0
+        },
+        "total_tokens": 32833
+      },
+      "response": {
+        "background": "opaque",
+        "created": 1786929023,
+        "data": [
+          {
+            "revised_prompt": "生成一张测试图片，保留参考图主体特征",
+            "url": "https://image.cjyyswq.com/uploads/2026/08/17/e1585feab3b64ac5b21e3c89d7d4bbee.png"
+          }
+        ],
+        "moderation": "auto",
+        "output_format": "png",
+        "quality": "auto",
+        "size": "1042x1510",
+        "usage": {
+          "input_tokens": 26270,
+          "input_tokens_details": {
+            "image_tokens": 26252,
+            "text_tokens": 18
+          },
+          "output_tokens": 6563,
+          "output_tokens_details": {
+            "image_tokens": 6563,
+            "text_tokens": 0
+          },
+          "total_tokens": 32833
+        }
+      }
+    },
+    "supported": true
+  }
+}

@@ -25,6 +25,10 @@ export async function saveSettings(settings) {
     }, 'API 配置保存失败')
 }
 
+export async function clearGeneratedCache() {
+    return request('/api/cache/clear', {method: 'POST'}, '缓存清理失败')
+}
+
 export function notifyActiveApiChanged(activeApiId = '') {
     localStorage.setItem('atelier-active-api', activeApiId)
     window.dispatchEvent(new CustomEvent('sample-factory-active-api-changed', {detail: {activeApiId}}))
@@ -45,7 +49,7 @@ export async function testApiConnection(api) {
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(api)
     }, '连接测试失败')
-    return data.data || data.models || []
+    return {models: data.data || data.models || [], detection: data.detection || null}
 }
 
 export async function generateImage(input, options = {}) {
