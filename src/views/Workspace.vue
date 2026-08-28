@@ -146,10 +146,21 @@ function fileToDataUrl(file) {
 
 async function getRequestSize(task, requestConfig) {
   if (requestConfig.size === 'custom') {
-    const custom = `${requestConfig.customWidth}x${requestConfig.customHeight}`
+    const width = Number(requestConfig.customWidth)
+    const height = Number(requestConfig.customHeight)
+    const custom = `${width}x${height}`
     return custom
   }
     return modelSupportsSize(requestConfig.size) ? requestConfig.size : '1024x1024';
+}
+
+function resolutionForSize(value) {
+  if (value === '1024x1024') return '1K'
+  if (value === '2048x2048') return '2K'
+  if (value === '4096x4096') return '4K'
+  // Custom dimensions already fully specify the output size. Sending a
+  // second, fixed resolution can make providers reject the request.
+  return ''
 }
 
 const materialLabels = {
@@ -645,15 +656,17 @@ function createGenerationWork() {
     error.value = '请先选择生成模型';
     return null
   }
-  if (size.value === 'custom' && (!Number.isInteger(customWidth.value) || !Number.isInteger(customHeight.value))) {
+  const normalizedWidth = Number(customWidth.value)
+  const normalizedHeight = Number(customHeight.value)
+  if (size.value === 'custom' && (!Number.isInteger(normalizedWidth) || !Number.isInteger(normalizedHeight))) {
     error.value = '请选择自定义尺寸后填写宽度和高度';
     return null
   }
-  if (size.value === 'custom' && (customWidth.value > 4096 || customHeight.value > 4096)) {
+  if (size.value === 'custom' && (normalizedWidth < 256 || normalizedHeight < 256 || normalizedWidth > 4096 || normalizedHeight > 4096)) {
     error.value = '自定义尺寸不能超过 4K（4096 像素）';
     return null
   }
-  if (size.value === 'custom' && (customWidth.value % 16 !== 0 || customHeight.value % 16 !== 0)) {
+  if (size.value === 'custom' && (normalizedWidth % 16 !== 0 || normalizedHeight % 16 !== 0)) {
     error.value = '自定义尺寸的宽度和高度必须都是 16 的倍数';
     return null
   }
@@ -674,11 +687,11 @@ function createGenerationWork() {
     mode: isTextMode.value ? 'text' : 'image',
     quality: modelMode.value === 'quality' ? 'high' : 'medium',
     size: size.value,
-    customWidth: customWidth.value,
-    customHeight: customHeight.value,
+    customWidth: size.value === 'custom' ? normalizedWidth : null,
+    customHeight: size.value === 'custom' ? normalizedHeight : null,
     replaceObject: replaceObject.value,
     format: format.value,
-    resolution: resolution.value
+    resolution: resolutionForSize(size.value)
   }
   const materialSnapshot = Object.fromEntries(
     Object.entries(materials.value).map(([key, items]) => [key, [...items]])
@@ -1262,7 +1275,7 @@ onBeforeUnmount(() => {
           <h3>样片预览</h3></div>
         <div v-if="running || completedCount" class="generation-status"><span>{{
             running ? (queuedCount ? `正在生成，后面还有 ${queuedCount} 组等待处理` : '正在调用接口生成') : '生成完成'
-          }}</span><b>{{ completedCount }} / {{ progressTotal }}</b>
+          }}</span>
           <div class="progress-track"><i :style="{width: progressPercent + '%'}"></i></div>
         </div>
         <div class="queue-actions">
@@ -1286,7 +1299,7 @@ onBeforeUnmount(() => {
           <div v-if="item.loading" class="loading-placeholder">
             <span>{{ item.status === 'generating' ? '正在加载图片...' : '等待生成' }}</span>
             <b>样片 {{ index + 1 }}</b>
-            <small>{{ completedCount }} / {{ progressTotal }}</small>
+            
             <el-button v-if="item.taskId" size="small" :icon="SwitchButton" @click="stopOne(index)">停止</el-button>
           </div>
           <div v-else-if="item.status === 'stopped'" class="result-stopped">
