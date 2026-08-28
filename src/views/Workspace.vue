@@ -155,9 +155,9 @@ async function getRequestSize(task, requestConfig) {
 }
 
 function resolutionForSize(value) {
-  if (value === '1024x1024') return '1K'
-  if (value === '2048x2048') return '2K'
-  if (value === '4096x4096') return '4K'
+  if (value === '1080x1920') return '1K'
+  if (value === '2160x3240') return '2K'
+  if (value === '2160x3840') return '4K'
   // Custom dimensions already fully specify the output size. Sending a
   // second, fixed resolution can make providers reject the request.
   return ''
@@ -246,9 +246,9 @@ const activeMaterialTypes = computed(() => {
 })
 
 const sizeOptions = [
-  {label: '1K（1024 × 1024）', value: '1024x1024'},
-  {label: '2K（2048 × 2048）', value: '2048x2048'},
-  {label: '4K（4096 × 4096）', value: '4096x4096'},
+  {label: '1K（1080x1920）', value: '1080x1920'},
+  {label: '2K（2160x3240）', value: '2160x3240'},
+  {label: '4K（2160x3840）', value: '2160x3840'},
   {label: '自定义尺寸', value: 'custom'}
 ]
 const selectedModel = computed(() => models.value.find((item) => item.id === model.value) || null)
@@ -1299,7 +1299,7 @@ onBeforeUnmount(() => {
           <div v-if="item.loading" class="loading-placeholder">
             <span>{{ item.status === 'generating' ? '正在加载图片...' : '等待生成' }}</span>
             <b>样片 {{ index + 1 }}</b>
-            
+
             <el-button v-if="item.taskId" size="small" :icon="SwitchButton" @click="stopOne(index)">停止</el-button>
           </div>
           <div v-else-if="item.status === 'stopped'" class="result-stopped">

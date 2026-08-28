@@ -15,26 +15,35 @@
         "imagePath": "/messages",
         "editPath": "/messages",
         "confidence": "verified",
-        "testedAt": "2026-08-28T13:45:29.363Z"
+        "testedAt": "2026-08-28T14:54:07.302Z"
       },
       "modelRoutes": {
-        "gpt-image-2-high": {
+        "gpt-image-2-1k": {
           "provider": "anthropic",
           "protocol": "anthropic-messages",
           "authType": "x-api-key",
           "imagePath": "/messages",
           "editPath": "/messages",
           "confidence": "verified",
-          "testedAt": "2026-08-28T13:45:29.363Z"
+          "testedAt": "2026-08-28T14:54:07.302Z"
         },
-        "gpt-image-2-super": {
+        "gpt-image-2": {
           "provider": "anthropic",
           "protocol": "anthropic-messages",
           "authType": "x-api-key",
           "imagePath": "/messages",
           "editPath": "/messages",
           "confidence": "verified",
-          "testedAt": "2026-08-28T13:45:29.363Z"
+          "testedAt": "2026-08-28T14:54:07.302Z"
+        },
+        "gpt-image-2-full": {
+          "provider": "anthropic",
+          "protocol": "anthropic-messages",
+          "authType": "x-api-key",
+          "imagePath": "/messages",
+          "editPath": "/messages",
+          "confidence": "verified",
+          "testedAt": "2026-08-28T14:54:07.302Z"
         }
       },
       "encryptedKey": "v1:y1Dvxa7L8EJP7sE4:4v+3KsfV1ZjAwU8g5OPgVA==:OqTPnHCQ73MR0ORvnB6j2ZDruHWW4NZcytYo3gnpzEj+ejjsTHlmg4HHRLmZAM+cFQFM"
