@@ -9,7 +9,12 @@ async function request(path, options, fallback) {
         throw new Error('本地数据服务未连接，请关闭程序后重新打开')
     }
     const data = await response.json().catch(() => ({}))
-    if (!response.ok) throw new Error(data.error?.message || data.error || fallback)
+    if (!response.ok) {
+        const error = new Error(data.error?.message || data.error || fallback)
+        error.status = response.status
+        error.details = data
+        throw error
+    }
     return data
 }
 

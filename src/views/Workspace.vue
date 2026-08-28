@@ -31,7 +31,7 @@ const prompt = ref('');
 const count = ref(1);
 const resolution = ref('2K');
 const format = ref('png');
-const size = ref('reference');
+const size = ref('1024x1024');
 const customWidth = ref(null);
 const customHeight = ref(null);
 const running = ref(false);
@@ -145,16 +145,11 @@ function fileToDataUrl(file) {
 }
 
 async function getRequestSize(task, requestConfig) {
-  if (requestConfig.size === 'custom') return `${requestConfig.customWidth}x${requestConfig.customHeight}`;
-  if (requestConfig.size !== 'reference') return requestConfig.size;
-  const file = rawFile(task.item);
-  if (!file || task.type === 'text') return '1024x1080';
-  const bitmap = await createImageBitmap(file, {imageOrientation: 'from-image'});
-  const ratio = bitmap.width / bitmap.height;
-  bitmap.close();
-  if (ratio < 0.6) return '2160x3840';
-  if (ratio < 0.8) return '2160x3240';
-  return '1024x1080';
+  if (requestConfig.size === 'custom') {
+    const custom = `${requestConfig.customWidth}x${requestConfig.customHeight}`
+    return custom
+  }
+    return modelSupportsSize(requestConfig.size) ? requestConfig.size : '1024x1024';
 }
 
 const materialLabels = {
@@ -187,7 +182,6 @@ const taskCount = computed(() => isTextMode.value ? (prompt.value.trim() || pres
 const totalExpected = computed(() => taskCount.value * Math.max(1, Number(count.value || 1)))
 const imagesPerRequest = computed(() => Object.values(materials.value).reduce((total, items) => total + items.length, 0))
 const sizeSummary = computed(() => {
-  if (size.value === 'reference') return '自适应主目标图尺寸'
   if (size.value === 'custom') return `${customWidth.value} x ${customHeight.value}`
   return size.value
 })
@@ -238,6 +232,26 @@ const activeMaterialTypes = computed(() => {
     edit: ['reference', 'editReference']
   }[imageOperation.value] || []
   return materialTypes.filter((item) => keys.includes(item.key))
+})
+
+const sizeOptions = [
+  {label: '1K（1024 × 1024）', value: '1024x1024'},
+  {label: '2K（2048 × 2048）', value: '2048x2048'},
+  {label: '4K（4096 × 4096）', value: '4096x4096'},
+  {label: '自定义尺寸', value: 'custom'}
+]
+const selectedModel = computed(() => models.value.find((item) => item.id === model.value) || null)
+function modelSupportsSize(value) {
+  if (value === 'custom') return true
+  const supported = selectedModel.value?.supportedSizes
+  return !Array.isArray(supported) || supported.length === 0 || supported.includes(value)
+}
+function sizeDisabled(value) {
+  return !modelSupportsSize(value)
+}
+
+watch(model, () => {
+  if (!modelSupportsSize(size.value)) size.value = '1024x1024'
 })
 
 function rawFile(value) {
@@ -475,7 +489,7 @@ async function startNewTask() {
   editParent.value = null;
   presetId.value = '';
   count.value = 1;
-  size.value = 'reference';
+  size.value = '1024x1024';
   customWidth.value = null;
   customHeight.value = null;
   error.value = '';
@@ -635,6 +649,18 @@ function createGenerationWork() {
     error.value = '请选择自定义尺寸后填写宽度和高度';
     return null
   }
+  if (size.value === 'custom' && (customWidth.value > 4096 || customHeight.value > 4096)) {
+    error.value = '自定义尺寸不能超过 4K（4096 像素）';
+    return null
+  }
+  if (size.value === 'custom' && (customWidth.value % 16 !== 0 || customHeight.value % 16 !== 0)) {
+    error.value = '自定义尺寸的宽度和高度必须都是 16 的倍数';
+    return null
+  }
+  if (size.value !== 'custom' && !modelSupportsSize(size.value)) {
+    error.value = `模型 ${model.value} 不支持 ${size.value}，请改用可用尺寸`;
+    return null
+  }
   if (!taskCount.value) {
     error.value = isTextMode.value ? '请填写图像描述' : '请添加目标构图、动作、道具，或填写补充提示词';
     return null
@@ -749,7 +775,7 @@ async function runGeneration(work) {
         if (e.name !== 'AbortError' && !controller.signal.aborted && !workController.signal.aborted) {
           error.value = e.message || '生成失败'
           const failedIndex = currentResultIndex()
-          if (failedIndex >= 0) results.value[failedIndex] = {...results.value[failedIndex], loading: false, status: 'failed', error: e.message || '生成失败'}
+          if (failedIndex >= 0) results.value[failedIndex] = {...results.value[failedIndex], loading: false, status: e.details?.generationAcceptedUnknown ? 'uncertain' : 'failed', uncertain: Boolean(e.details?.generationAcceptedUnknown), error: e.message || '生成失败'}
         }
       } finally {
         completedCount.value += 1
@@ -761,7 +787,7 @@ async function runGeneration(work) {
   } catch (e) {
     if (e.name !== 'AbortError') error.value = e.message;
     results.value.slice(work.resultStart, work.resultStart + work.jobs.length).forEach((item, offset) => {
-      if (item?.loading) results.value[work.resultStart + offset] = {...item, loading: false, status: 'failed', error: e.message || '生成失败'}
+      if (item?.loading) results.value[work.resultStart + offset] = {...item, loading: false, status: e.details?.generationAcceptedUnknown ? 'uncertain' : 'failed', uncertain: Boolean(e.details?.generationAcceptedUnknown), error: e.message || '生成失败'}
     })
   } finally {
     work.controller = null
@@ -871,7 +897,7 @@ async function continueEdit() {
     imageOperation.value = 'edit'
     editParent.value = result
     prompt.value = ''
-    size.value = 'reference'
+    size.value = '1024x1024'
     presetId.value = ''
     selected.value = new Set()
     showMessage('success', '已将选中样片设为编辑基础图')
@@ -905,7 +931,7 @@ async function restoreHistoryEdit() {
     mode.value = 'image';
     imageOperation.value = 'edit';
     editParent.value = source;
-    size.value = 'reference'
+    size.value = '1024x1024'
   } catch (exception) {
     error.value = exception.message || '无法读取历史样片'
   }
@@ -953,7 +979,7 @@ async function retry(index) {
     if (e.name === 'AbortError') {
       results.value[index] = {...results.value[index], loading: false, status: 'stopped', error: ''}
     } else {
-      results.value[index] = {...results.value[index], loading: false, status: 'failed', error: e.message || '生成失败'}
+      results.value[index] = {...results.value[index], loading: false, status: e.details?.generationAcceptedUnknown ? 'uncertain' : 'failed', uncertain: Boolean(e.details?.generationAcceptedUnknown), error: e.message || '生成失败'}
       error.value = e.message || '生成失败'
     }
   } finally {
@@ -1175,7 +1201,7 @@ onBeforeUnmount(() => {
               <el-form-item class="quick-control quick-model" label="模型">
                 <el-select v-model="model" class="studio-select" filterable allow-create default-first-option :placeholder="configLoading ? '正在加载模型...' : '选择模型，可直接输入模型 ID'" popper-class="studio-select-popper" clearable :loading="configLoading">
                   <el-option v-for="(item, index) in models" :key="item.id" :label="item.id" :value="item.id">
-                    <div class="select-option"><span class="select-index">{{ String(index + 1).padStart(2, '0') }}</span><span><b>{{ item.id }}</b><small>{{ index === 0 ? '主力生成模型' : '备用生成模型' }}</small></span></div>
+                    <div class="select-option"><span class="select-index">{{ String(index + 1).padStart(2, '0') }}</span><span><b>{{ item.id }}</b><small>{{ item.supportedSizes?.length ? `支持 ${item.supportedSizes.join('、')}` : (index === 0 ? '主力生成模型' : '备用生成模型') }}</small></span></div>
                   </el-option>
                 </el-select>
               </el-form-item>
@@ -1189,7 +1215,9 @@ onBeforeUnmount(() => {
               </el-form-item>
               <el-form-item class="quick-control quick-size" label="尺寸">
                 <el-select v-model="size" class="studio-select" popper-class="studio-select-popper">
-                  <el-option label="根据目标图" value="reference"/><el-option label="1024 × 1080" value="1024x1080"/><el-option label="2160 × 3840" value="2160x3840"/><el-option label="2160 × 3240" value="2160x3240"/><el-option label="自定义尺寸" value="custom"/>
+                  <el-option v-for="option in sizeOptions" :key="option.value" :label="option.label" :value="option.value" :disabled="sizeDisabled(option.value)">
+                    <span>{{ option.label }}<small v-if="sizeDisabled(option.value)" class="size-option-note">（当前模型不支持）</small></span>
+                  </el-option>
                 </el-select>
               </el-form-item>
               <el-form-item class="quick-control quick-count" label="数量"><el-input-number v-model="count" :min="1" :max="10" controls-position="right"/></el-form-item>
@@ -1265,10 +1293,10 @@ onBeforeUnmount(() => {
             <strong>已停止生成</strong>
             <el-button v-if="item.task || item.requestSnapshot" size="small" :icon="Refresh" @click="retry(index)">重试</el-button>
           </div>
-          <div v-else-if="item.error" class="result-error">
-            <strong>生成失败</strong>
+          <div v-else-if="item.error" class="result-error" :class="{ 'result-uncertain': item.uncertain }">
+            <strong>{{ item.uncertain ? '结果待确认' : '生成失败' }}</strong>
             <span>{{ item.error }}</span>
-            <el-button v-if="item.task" size="small" :icon="Refresh" @click="retry(index)">重试</el-button>
+            <el-button v-if="item.task && !item.uncertain" size="small" :icon="Refresh" @click="retry(index)">重试</el-button>
           </div>
           <template v-else-if="item.url">
             <el-image :src="item.url" fit="cover"
@@ -1296,3 +1324,4 @@ onBeforeUnmount(() => {
     </section>
   </div>
 </template>
+

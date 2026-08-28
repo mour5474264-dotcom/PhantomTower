@@ -72,6 +72,20 @@ main { height: calc(100% - 64px); min-height: 0; overflow: hidden; padding: 12px
 .v5-home-layout > .queue > .gallery,
 .v5-home-layout > .queue > .empty { order: 1 !important; grid-row: auto !important; align-self: stretch; }
 .v5-home-layout > .queue > .gallery { flex: 1 1 auto; margin-top: 6px; align-content: start; }
+.v5-home-layout > .queue > .gallery {
+  /* Keep a readable card width as the result pane changes size. The grid
+     drops a column before cards become cramped, while the gap remains fixed. */
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  column-gap: 14px;
+  row-gap: 16px;
+  align-items: start;
+}
+.v5-home-layout > .queue > .gallery .result-card {
+  width: 100%;
+  min-width: 0;
+  aspect-ratio: 4 / 3;
+  height: auto;
+}
 .v5-home-layout > .queue > .empty { flex: 1 1 auto; margin-top: 6px; }
 .v5-home-layout > .queue > .gallery::-webkit-scrollbar,
 .v5-home-layout > .queue > .empty::-webkit-scrollbar { width: 0; height: 0; }
@@ -266,6 +280,19 @@ main { height: calc(100% - 64px); min-height: 0; overflow: hidden; padding: 12px
   .quick-controls { flex-wrap: wrap; }
   .composer-prompt { margin-right: 0 !important; }
   .prompt-resize-handle { height: 10px; }
+  .v5-home-layout > .queue > .gallery {
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    column-gap: 12px;
+    row-gap: 14px;
+  }
+}
+
+@media (max-width: 440px) {
+  .v5-home-layout > .queue > .gallery {
+    grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
+    column-gap: 10px;
+    row-gap: 12px;
+  }
 }
 
 /* The rail handle sits on the existing left-panel boundary; it has no visible divider of its own. */

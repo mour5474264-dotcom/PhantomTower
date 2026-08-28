@@ -193,6 +193,25 @@ function modelId(model) {
     return typeof model === 'string' ? model : model?.id
 }
 
+// Model APIs do not have a single standard for image size capabilities. Keep
+// the useful, provider-supplied values while avoiding leaking the full model
+// object to the renderer.
+function modelWithCapabilities(item) {
+    if (typeof item === 'string') return {id: item, name: item}
+    const id = String(item?.id || item?.name || '').replace(/^models\//, '')
+    const rawSizes = item?.supportedSizes || item?.supported_sizes || item?.supported_image_sizes
+        || item?.imageSizes || item?.image_sizes || item?.output_sizes || item?.available_sizes
+        || item?.capabilities?.sizes || item?.capabilities?.image?.sizes
+    const sizes = Array.isArray(rawSizes)
+        ? rawSizes.map((value) => typeof value === 'string' ? value : `${value?.width || ''}x${value?.height || ''}`).filter((value) => /^\d+x\d+$/i.test(value))
+        : undefined
+    return {
+        id,
+        name: item?.display_name || item?.displayName || id,
+        ...(sizes?.length ? {supportedSizes: [...new Set(sizes)]} : {})
+    }
+}
+
 function dataUrlFile(dataUrl, filename = 'reference.png') {
     const match = String(dataUrl || '').match(/^data:([^;]+);base64,(.+)$/s)
     if (!match) throw new Error('invalid reference image data')
@@ -206,12 +225,14 @@ function referenceFilename(dataUrl, index) {
 
 async function upstreamJson(response, context = '上游 API') {
     const text = await response.text()
+    if (response.status === 524) {
+        const error = new Error(`${context}响应超时（HTTP 524）。上游中转站可能已经接受请求并计费，但未能在规定时间内返回图片；请先到服务商记录确认，不要立即重复提交。`)
+        error.code = 'UPSTREAM_524'
+        throw error
+    }
     try {
         return text ? JSON.parse(text) : {}
     } catch {
-        if (response.status === 524) {
-            throw new Error(`${context}响应超时（HTTP 524）。上游中转站未能在规定时间内完成图片生成，请稍后重试；如果持续出现，请确认该平台支持 Gemini 图生图和多张参考图。`)
-        }
         if (response.status === 502 || response.status === 503 || response.status === 504) {
             throw new Error(`${context}暂时不可用（HTTP ${response.status}）。请稍后重试，或检查中转站服务状态。`)
         }
@@ -320,10 +341,10 @@ function friendlyProviderError(result, status, referenceRequest = false) {
     const raw = typeof result === 'string' ? result : (result?.error?.message || result?.error || result?.message || '')
     const text = String(raw)
     if (status === 400 && /(?:invalid|unsupported|not supported).{0,80}(?:size|dimension|resolution|width|height)|(?:size|dimension|resolution|width|height).{0,80}(?:invalid|unsupported|not supported)/i.test(text)) {
-        return '当前模型或中转站不支持所选图片尺寸。请改用 1024x1080，或在 API 管理中确认该模型支持 2160x3240。'
+        return '当前模型或中转站不支持所选图片尺寸。请改用 1K（1024x1024），或选择模型支持的尺寸。'
     }
     if (status === 413) {
-        return '图片请求过大，当前模型或中转站无法处理该尺寸或参考图。请改用 1024x1080，或减少参考图数量后重试。'
+        return '图片请求过大，当前模型或中转站无法处理该尺寸或参考图。请改用 1K（1024x1024），或减少参考图数量后重试。'
     }
     if (/images api.*not supported|image api.*not supported|not supported.*images api/i.test(text)) {
         return referenceRequest
@@ -337,7 +358,7 @@ function friendlyProviderError(result, status, referenceRequest = false) {
 function upstreamFetchError(error, context, size = '') {
     const code = String(error?.cause?.code || error?.code || '')
     const sizeText = size ? `（请求尺寸 ${size}）` : ''
-    if (error?.generationTimedOut || error?.name === 'AbortError') return `${context}超时${sizeText}。图片生成耗时过长，请稍后重试；也可改用 1024x1080。`
+    if (error?.generationTimedOut || error?.name === 'AbortError') return `${context}超时${sizeText}。图片生成耗时过长，请稍后重试；也可改用 1K（1024x1024）。`
     if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') return `无法解析图片服务地址${sizeText}。请检查网络、DNS 或 API 地址后重试。`
     if (code === 'ECONNREFUSED' || code === 'ECONNRESET' || code === 'ETIMEDOUT' || code === 'UND_ERR_CONNECT_TIMEOUT') return `无法连接图片服务${sizeText}。请检查网络、代理或中转站状态后重试。`
     return `${context}网络连接失败${sizeText}。请检查网络、代理和中转站状态后重试。`
@@ -394,8 +415,12 @@ async function fetchModels(api) {
     if (provider === 'gemini' && response.ok) {
         const models = (payload.models || [])
             .filter((item) => (item.supportedGenerationMethods || []).includes('generateContent'))
-            .map((item) => ({id: String(item.name || '').replace(/^models\//, ''), name: item.displayName || item.name}))
+            .map((item) => modelWithCapabilities({...item, id: item.name, name: item.name}))
         return {status: 200, payload: {data: models}}
+    }
+    if (response.ok) {
+        const source = payload?.data || payload?.models || []
+        return {status: response.status, payload: {...payload, data: source.map(modelWithCapabilities)}}
     }
     return {status: response.status, payload}
 }
@@ -432,7 +457,7 @@ async function detectConnection(api) {
                 failures.push(`${probe.provider}: HTTP ${response.status}`)
                 continue
             }
-            const models = probe.models(payload).map((item) => typeof item === 'string' ? {id: item, name: item} : ({id: String(item.id || item.name || '').replace(/^models\//, ''), name: item.display_name || item.displayName || item.id || item.name}))
+            const models = probe.models(payload).map(modelWithCapabilities)
                 .filter((item) => item.id)
             return {
                 status: 200,
@@ -899,7 +924,7 @@ http.createServer(async (req, res) => {
                     return send(res, 504, {
                         error: upstreamFetchError(error, '图片生成接口', input.size),
                         provider,
-                        hint: `本次请求尺寸为 ${input.size || '默认尺寸'}；2160x3240 仅在当前模型和中转站支持时可用。`
+                        hint: `本次请求尺寸为 ${input.size || '默认尺寸'}；请确认当前模型支持该尺寸。`
                     })
                 } finally {
                     activeGenerations.delete(activeTaskId)
@@ -909,6 +934,7 @@ http.createServer(async (req, res) => {
                 } catch (error) {
                     return send(res, response.ok ? 502 : response.status, {
                         error: error.message,
+                        generationAcceptedUnknown: error.code === 'UPSTREAM_524',
                         provider,
                         endpoint: provider === 'gemini' ? geminiUrl(api, input.model) : apiUrl(api.endpoint, imagePath),
                         hint: isReferenceRequest ? '当前请求包含参考图，请确认该平台支持图生图接口或 Gemini 图片输入。' : '请确认接口地址是 API 根地址，而不是网站首页。'
@@ -937,7 +963,7 @@ http.createServer(async (req, res) => {
                     try {
                         result = await upstreamJson(response, 'Gemini 回退接口')
                     } catch (error) {
-                        return send(res, response.ok ? 502 : response.status, {error: error.message, provider: 'gemini', endpoint: geminiUrl(api, input.model), hint: '中转站不支持 OpenAI Images API，且 Gemini 原生接口也未返回 JSON，请核对该中转站的 Gemini 接口地址。'})
+                        return send(res, response.ok ? 502 : response.status, {error: error.message, generationAcceptedUnknown: error.code === 'UPSTREAM_524', provider: 'gemini', endpoint: geminiUrl(api, input.model), hint: '中转站不支持 OpenAI Images API，且 Gemini 原生接口也未返回 JSON，请核对该中转站的 Gemini 接口地址。'})
                     }
                 }
                 if (!response.ok) return send(res, response.status, {error: friendlyProviderError(result, response.status, isReferenceRequest), provider: responseProvider})
