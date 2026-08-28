@@ -60,7 +60,8 @@
     ],
     "win": {
       "target": "nsis",
-      "icon": "build/icon/phantom-tower.ico"
+      "icon": "build/icon/phantom-tower.ico",
+      "artifactName": "phantom-tower-setup-${version}.${ext}"
     },
     "mac": {
       "target": [
