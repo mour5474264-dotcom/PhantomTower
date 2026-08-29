@@ -1,15 +1,16 @@
 <script setup>
 import {ref, onMounted, onBeforeUnmount} from 'vue'
 import {useRouter} from 'vue-router'
-import {Download, Maximize2, X} from 'lucide-vue-next'
-import {getRecords, downloadImage, exportImages, makeImageFilename} from '../api'
-import {ElMessage} from 'element-plus'
+import {Download, Maximize2, Trash2, X} from 'lucide-vue-next'
+import {deleteRecord, getRecords, downloadImage, exportImages, makeImageFilename} from '../api'
+import {ElMessage, ElMessageBox} from 'element-plus'
 
 const records = ref([]);
 const error = ref('');
 const preview = ref(null)
 const exportingRecord = ref('')
 const savingImage = ref('')
+const deletingRecord = ref('')
 const router = useRouter()
 
 function formatRecordTime(value) {
@@ -53,6 +54,21 @@ async function downloadAll(record) {
   }
 }
 
+async function removeRecord(record) {
+  if (deletingRecord.value) return
+  try {
+    await ElMessageBox.confirm('删除后将不再显示这条生成记录。', '确认删除', {type: 'warning'})
+    deletingRecord.value = record.id
+    await deleteRecord(record.id)
+    records.value = records.value.filter((item) => item.id !== record.id)
+    ElMessage.success('生成记录已删除')
+  } catch (e) {
+    if (e !== 'cancel' && e !== 'close') ElMessage.error(e?.message || '生成记录删除失败，请稍后重试')
+  } finally {
+    deletingRecord.value = ''
+  }
+}
+
 function closePreview() {
   preview.value = null
 }
@@ -87,10 +103,16 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onPreviewKeydown))
       <div v-for="record in records" :key="record.id" class="record-card">
         <div class="record-meta">
           <div><b>生成时间</b><span>{{ formatRecordTime(record.createdAt) }}</span></div>
-          <button class="secondary" :disabled="exportingRecord === record.id" @click="downloadAll(record)">
-            <Download :size="14"/>
-            {{ exportingRecord === record.id ? '正在导出' : '导出本次图片' }}
-          </button>
+          <div class="record-meta-actions">
+            <button class="secondary" :disabled="exportingRecord === record.id || deletingRecord === record.id" @click="downloadAll(record)">
+              <Download :size="14"/>
+              {{ exportingRecord === record.id ? '正在导出' : '导出本次图片' }}
+            </button>
+            <button class="secondary record-delete" :disabled="deletingRecord === record.id || exportingRecord === record.id" @click="removeRecord(record)">
+              <Trash2 :size="14"/>
+              {{ deletingRecord === record.id ? '正在删除' : '删除' }}
+            </button>
+          </div>
         </div>
         <p v-if="record.prompt" class="record-prompt">{{ record.prompt }}</p>
         <div class="record-images">

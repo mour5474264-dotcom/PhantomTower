@@ -111,6 +111,10 @@ export async function getRecords() {
     return request('/api/records', undefined, '生成记录读取失败')
 }
 
+export async function deleteRecord(id) {
+    return request(`/api/records/${encodeURIComponent(id)}`, {method: 'DELETE'}, '生成记录删除失败')
+}
+
 function shortId() {
     return (globalThis.crypto?.randomUUID?.() || Math.random().toString(36).slice(2)).replace(/-/g, '').slice(0, 8)
 }

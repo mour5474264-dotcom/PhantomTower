@@ -20,6 +20,9 @@ const files = {
     imageCache: path.join(dataDir, 'image-cache.json')
 }
 const activeGenerations = new Map()
+// A single in-flight cache task per remote image URL. Interactive actions can
+// await this promise instead of starting a second download.
+const pendingImages = new Map()
 let recordsWriteQueue = Promise.resolve()
 // Development server fallback keeps `npm run server` usable; packaged builds
 // always receive a per-user key from Electron's OS-backed safeStorage.
@@ -380,6 +383,17 @@ function appendGenerationRecord(record) {
     return recordsWriteQueue
 }
 
+function deleteGenerationRecord(id) {
+    recordsWriteQueue = recordsWriteQueue.catch(() => null).then(async () => {
+        const records = await read(files.records, [])
+        const next = records.filter((record) => record?.id !== id)
+        if (next.length === records.length) return false
+        await write(files.records, next)
+        return true
+    })
+    return recordsWriteQueue
+}
+
 function appendGenerationOptions(form, payload, input) {
     form.append('model', String(payload.model))
     form.append('prompt', String(payload.prompt))
@@ -559,6 +573,39 @@ function generatedUrl(filename) {
     return `http://127.0.0.1:4317/api/generated/${encodeURIComponent(filename)}`
 }
 
+async function resolveRecordImage(image) {
+    const currentUrl = String(image?.url || '')
+    if (currentUrl.startsWith('http://127.0.0.1:4317/api/generated/')) {
+        try {
+            const filename = decodeURIComponent(new URL(currentUrl).pathname.slice('/api/generated/'.length))
+            await fs.access(path.join(generatedDir, filename))
+            return image
+        } catch {
+            // Fall through to the durable provider URL or embedded image data.
+        }
+    } else if (currentUrl || image?.b64_json) {
+        return image
+    }
+    if (typeof image?.sourceUrl === 'string' && /^https?:\/\//i.test(image.sourceUrl)) {
+        return {...image, url: image.sourceUrl}
+    }
+    if (typeof image?.b64_json === 'string' && image.b64_json) {
+        const mimeType = image.mime_type || image.content_type || 'image/png'
+        return {...image, url: `data:${mimeType};base64,${image.b64_json}`}
+    }
+    return image
+}
+
+async function resolveRecordImages(records) {
+    return Promise.all(records.map(async (record) => {
+        const value = record && typeof record === 'object' ? record : {}
+        return {
+            ...value,
+            images: await Promise.all((Array.isArray(value.images) ? value.images : []).map(resolveRecordImage))
+        }
+    }))
+}
+
 async function writeGeneratedImage(filename, buffer) {
     await fs.mkdir(generatedDir, {recursive: true})
     const file = path.join(generatedDir, filename)
@@ -629,6 +676,14 @@ async function persistImage(url) {
     return cacheImage(url)
 }
 
+function cacheImageInBackground(url) {
+    const current = pendingImages.get(url)
+    if (current) return current
+    const task = persistImage(url).finally(() => pendingImages.delete(url))
+    pendingImages.set(url, task)
+    return task
+}
+
 async function getDownloadImage(url) {
     if (/^data:image\//i.test(url)) {
         const match = url.match(/^data:([^;]+);base64,(.+)$/s)
@@ -641,6 +696,11 @@ async function getDownloadImage(url) {
     if (/^https?:/i.test(url) && !url.startsWith('http://127.0.0.1:4317/api/generated/')) {
         const local = await cachedImage(url)
         if (local) return {buffer: await fs.readFile(local.file), contentType: local.contentType}
+        const pending = pendingImages.get(url)
+        if (pending) {
+            const entry = await pending
+            return {buffer: await fs.readFile(entry.file), contentType: entry.contentType}
+        }
     }
     const local = await persistImage(url)
     return {buffer: await fs.readFile(local.file), contentType: local.contentType}
@@ -653,7 +713,7 @@ http.createServer(async (req, res) => {
     if (req.method === 'OPTIONS') {
         const origin = req.headers.origin
         const allowedOrigin = !origin || origin === 'null' || /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin) ? (origin || 'null') : 'null'
-        res.writeHead(204, {'Access-Control-Allow-Origin': allowedOrigin, 'Access-Control-Allow-Headers': 'Content-Type', 'Access-Control-Allow-Methods': 'GET,POST,OPTIONS', 'Vary': 'Origin'});
+        res.writeHead(204, {'Access-Control-Allow-Origin': allowedOrigin, 'Access-Control-Allow-Headers': 'Content-Type', 'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS', 'Vary': 'Origin'});
         return res.end()
     }
     try {
@@ -740,7 +800,13 @@ http.createServer(async (req, res) => {
         }
         if (req.url === '/api/records' && req.method === 'GET') {
             const records = await read(files.records, [])
-            return send(res, 200, Array.isArray(records) ? records : [])
+            return send(res, 200, await resolveRecordImages(Array.isArray(records) ? records : []))
+        }
+        const recordMatch = req.url.match(/^\/api\/records\/([^/?]+)$/)
+        if (recordMatch && req.method === 'DELETE') {
+            const id = decodeURIComponent(recordMatch[1])
+            if (!await deleteGenerationRecord(id)) return send(res, 404, {error: 'generation record not found'})
+            return send(res, 200, {ok: true})
         }
         if (req.url.startsWith('/api/generated/') && req.method === 'GET') {
             const name = decodeURIComponent(req.url.slice('/api/generated/'.length)).replace(/[^a-zA-Z0-9._-]/g, '')
@@ -975,25 +1041,18 @@ http.createServer(async (req, res) => {
                 images.push(...normalizedData)
             }
             if (controller.signal.aborted) return
-            // Do not return a provider URL until its result has been written locally.
-            // The client remains in its progress state during this operation, and every
-            // result, preview, and later export can use the local generated-file route.
-            let persistedImages
-            try {
-                persistedImages = await Promise.all(images.map(async (image) => {
-                    const contentType = image?.mime_type || image?.content_type || 'image/png'
-                    const source = image?.url || (image?.b64_json ? `data:${contentType};base64,${image.b64_json}` : '')
-                    if (!source) return image
-                    const local = await persistImage(source)
-                    return {...image, url: generatedUrl(local.filename), sourceUrl: image.url || source}
-                }))
-            } catch (error) {
-                return send(res, 502, {
-                    error: upstreamFetchError(error, '生成结果下载', input.size),
-                    provider: responseProvider,
-                    hint: '图片接口可能已经生成成功，但应用无法从上游下载图片保存到本地。请稍后重试。'
+            // Return the provider URL immediately so the browser can display it.
+            // Cache each result in the background; save/edit/export operations wait
+            // on the same pending promise through getDownloadImage().
+            const persistedImages = images.map((image) => {
+                const contentType = image?.mime_type || image?.content_type || 'image/png'
+                const source = image?.url || (image?.b64_json ? `data:${contentType};base64,${image.b64_json}` : '')
+                if (!source) return image
+                cacheImageInBackground(source).catch((error) => {
+                    console.error('image cache failed:', error.message)
                 })
-            }
+                return {...image, url: source, sourceUrl: image.url || source}
+            })
             const record = {
                 id: Date.now().toString(),
                 createdAt: new Date().toISOString(),

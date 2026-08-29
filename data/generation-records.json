@@ -1,5 +1,48 @@
 [
   {
+    "id": "1787971828298",
+    "createdAt": "2026-08-29T02:50:28.298Z",
+    "model": "gpt-image-2",
+    "prompt": "",
+    "request": {
+      "taskId": "e6154fea-0181-427c-bb82-dcac9509003a",
+      "parentResultId": null,
+      "version": 1,
+      "operation": "batch",
+      "presetId": null,
+      "builtinPresetId": "person-replace",
+      "imageCount": 2,
+      "materials": [
+        {
+          "index": 1,
+          "role": "target_reference",
+          "type": "目标/构图"
+        },
+        {
+          "index": 2,
+          "role": "person_reference",
+          "type": "人物"
+        }
+      ]
+    },
+    "responses": [
+      {
+        "usage": null,
+        "revisedPrompts": []
+      }
+    ],
+    "images": [
+      {
+        "url": "https://image.cjyyswq.com/uploads/2026/08/29/2f72ba3f3b7948bc9f01a7293172f5bd.png",
+        "sourceUrl": "https://image.cjyyswq.com/uploads/2026/08/29/2f72ba3f3b7948bc9f01a7293172f5bd.png",
+        "id": "a0b0dde7-8894-4d58-8ee4-8a97a774b606",
+        "taskId": "e6154fea-0181-427c-bb82-dcac9509003a",
+        "parentResultId": null,
+        "version": 1
+      }
+    ]
+  },
+  {
     "id": "1787929907412",
     "createdAt": "2026-08-28T15:11:47.412Z",
     "model": "gpt-image-2",

@@ -71,6 +71,39 @@ function generatedUrl(filename) {
     return `http://127.0.0.1:4317/api/generated/${encodeURIComponent(filename)}`
 }
 
+async function resolveRecordImage(image) {
+    const currentUrl = String(image?.url || '')
+    if (currentUrl.startsWith('http://127.0.0.1:4317/api/generated/')) {
+        try {
+            const filename = decodeURIComponent(new URL(currentUrl).pathname.slice('/api/generated/'.length))
+            await fs.access(path.join(generatedDir, filename))
+            return image
+        } catch {
+            // Fall through to the durable provider URL or embedded image data.
+        }
+    } else if (currentUrl || image?.b64_json) {
+        return image
+    }
+    if (typeof image?.sourceUrl === 'string' && /^https?:\/\//i.test(image.sourceUrl)) {
+        return {...image, url: image.sourceUrl}
+    }
+    if (typeof image?.b64_json === 'string' && image.b64_json) {
+        const mimeType = image.mime_type || image.content_type || 'image/png'
+        return {...image, url: `data:${mimeType};base64,${image.b64_json}`}
+    }
+    return image
+}
+
+async function resolveRecordImages(records) {
+    return Promise.all(records.map(async (record) => {
+        const value = record && typeof record === 'object' ? record : {}
+        return {
+            ...value,
+            images: await Promise.all((Array.isArray(value.images) ? value.images : []).map(resolveRecordImage))
+        }
+    }))
+}
+
 async function writeGeneratedImage(filename, buffer) {
     await fs.mkdir(generatedDir, {recursive: true})
     const file = path.join(generatedDir, filename)
@@ -163,7 +196,7 @@ async function getDownloadImage(url) {
 
 http.createServer(async (req, res) => {
     if (req.method === 'OPTIONS') {
-        res.writeHead(204, {'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'Content-Type'});
+        res.writeHead(204, {'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': 'Content-Type', 'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS'});
         return res.end()
     }
     try {
@@ -185,7 +218,10 @@ http.createServer(async (req, res) => {
             await write(files.presets, await json(req));
             return send(res, 200, {ok: true})
         }
-        if (req.url === '/api/records' && req.method === 'GET') return send(res, 200, await read(files.records, []))
+        if (req.url === '/api/records' && req.method === 'GET') {
+            const records = await read(files.records, [])
+            return send(res, 200, await resolveRecordImages(Array.isArray(records) ? records : []))
+        }
         if (req.url.startsWith('/api/image-status') && req.method === 'GET') {
             const target = new URL(req.url, 'http://127.0.0.1').searchParams.get('url')
             return send(res, 200, {saving: Boolean(target && pendingImages.has(target))})

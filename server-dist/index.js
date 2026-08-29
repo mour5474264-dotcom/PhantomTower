@@ -20,6 +20,7 @@ var files = {
 	imageCache: path.join(dataDir, "image-cache.json")
 };
 var activeGenerations = /* @__PURE__ */ new Map();
+var pendingImages = /* @__PURE__ */ new Map();
 var recordsWriteQueue = Promise.resolve();
 var secretKey = process.env.PHANTOMTOWER_SECRET_KEY || crypto.createHash("sha256").update("phantomtower-development-only").digest("hex");
 function encryptionKey() {
@@ -332,6 +333,16 @@ function appendGenerationRecord(record) {
 	});
 	return recordsWriteQueue;
 }
+function deleteGenerationRecord(id) {
+	recordsWriteQueue = recordsWriteQueue.catch(() => null).then(async () => {
+		const records = await read(files.records, []);
+		const next = records.filter((record) => record?.id !== id);
+		if (next.length === records.length) return false;
+		await write(files.records, next);
+		return true;
+	});
+	return recordsWriteQueue;
+}
 function appendGenerationOptions(form, payload, input) {
 	form.append("model", String(payload.model));
 	form.append("prompt", String(payload.prompt));
@@ -530,6 +541,36 @@ async function repairStoredImageExtensions() {
 function generatedUrl(filename) {
 	return `http://127.0.0.1:4317/api/generated/${encodeURIComponent(filename)}`;
 }
+async function resolveRecordImage(image) {
+	const currentUrl = String(image?.url || "");
+	if (currentUrl.startsWith("http://127.0.0.1:4317/api/generated/")) try {
+		const filename = decodeURIComponent(new URL(currentUrl).pathname.slice(15));
+		await fs.access(path.join(generatedDir, filename));
+		return image;
+	} catch {}
+	else if (currentUrl || image?.b64_json) return image;
+	if (typeof image?.sourceUrl === "string" && /^https?:\/\//i.test(image.sourceUrl)) return {
+		...image,
+		url: image.sourceUrl
+	};
+	if (typeof image?.b64_json === "string" && image.b64_json) {
+		const mimeType = image.mime_type || image.content_type || "image/png";
+		return {
+			...image,
+			url: `data:${mimeType};base64,${image.b64_json}`
+		};
+	}
+	return image;
+}
+async function resolveRecordImages(records) {
+	return Promise.all(records.map(async (record) => {
+		const value = record && typeof record === "object" ? record : {};
+		return {
+			...value,
+			images: await Promise.all((Array.isArray(value.images) ? value.images : []).map(resolveRecordImage))
+		};
+	}));
+}
 async function writeGeneratedImage(filename, buffer) {
 	await fs.mkdir(generatedDir, { recursive: true });
 	const file = path.join(generatedDir, filename);
@@ -611,6 +652,13 @@ async function persistImage(url) {
 	}
 	return cacheImage(url);
 }
+function cacheImageInBackground(url) {
+	const current = pendingImages.get(url);
+	if (current) return current;
+	const task = persistImage(url).finally(() => pendingImages.delete(url));
+	pendingImages.set(url, task);
+	return task;
+}
 async function getDownloadImage(url) {
 	if (/^data:image\//i.test(url)) {
 		const match = url.match(/^data:([^;]+);base64,(.+)$/s);
@@ -627,6 +675,14 @@ async function getDownloadImage(url) {
 			buffer: await fs.readFile(local.file),
 			contentType: local.contentType
 		};
+		const pending = pendingImages.get(url);
+		if (pending) {
+			const entry = await pending;
+			return {
+				buffer: await fs.readFile(entry.file),
+				contentType: entry.contentType
+			};
+		}
 	}
 	const local = await persistImage(url);
 	return {
@@ -643,7 +699,7 @@ http.createServer(async (req, res) => {
 		res.writeHead(204, {
 			"Access-Control-Allow-Origin": allowedOrigin,
 			"Access-Control-Allow-Headers": "Content-Type",
-			"Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+			"Access-Control-Allow-Methods": "GET,POST,DELETE,OPTIONS",
 			"Vary": "Origin"
 		});
 		return res.end();
@@ -736,7 +792,12 @@ http.createServer(async (req, res) => {
 		})), files.builtInPromptTemplates));
 		if (req.url === "/api/records" && req.method === "GET") {
 			const records = await read(files.records, []);
-			return send(res, 200, Array.isArray(records) ? records : []);
+			return send(res, 200, await resolveRecordImages(Array.isArray(records) ? records : []));
+		}
+		const recordMatch = req.url.match(/^\/api\/records\/([^/?]+)$/);
+		if (recordMatch && req.method === "DELETE") {
+			if (!await deleteGenerationRecord(decodeURIComponent(recordMatch[1]))) return send(res, 404, { error: "generation record not found" });
+			return send(res, 200, { ok: true });
 		}
 		if (req.url.startsWith("/api/generated/") && req.method === "GET") {
 			const name = decodeURIComponent(req.url.slice(15)).replace(/[^a-zA-Z0-9._-]/g, "");
@@ -939,7 +1000,7 @@ http.createServer(async (req, res) => {
 					return send(res, 504, {
 						error: upstreamFetchError(error, "图片生成接口", input.size),
 						provider,
-						hint: `本次请求尺寸为 ${input.size || "默认尺寸"}；2160x3240 仅在当前模型和中转站支持时可用。`
+						hint: `本次请求尺寸为 ${input.size || "默认尺寸"}；请确认当前模型支持该尺寸。`
 					});
 				} finally {
 					activeGenerations.delete(activeTaskId);
@@ -997,26 +1058,19 @@ http.createServer(async (req, res) => {
 				images.push(...normalizedData);
 			}
 			if (controller.signal.aborted) return;
-			let persistedImages;
-			try {
-				persistedImages = await Promise.all(images.map(async (image) => {
-					const contentType = image?.mime_type || image?.content_type || "image/png";
-					const source = image?.url || (image?.b64_json ? `data:${contentType};base64,${image.b64_json}` : "");
-					if (!source) return image;
-					const local = await persistImage(source);
-					return {
-						...image,
-						url: generatedUrl(local.filename),
-						sourceUrl: image.url || source
-					};
-				}));
-			} catch (error) {
-				return send(res, 502, {
-					error: upstreamFetchError(error, "生成结果下载", input.size),
-					provider: responseProvider,
-					hint: "图片接口可能已经生成成功，但应用无法从上游下载图片保存到本地。请稍后重试。"
+			const persistedImages = images.map((image) => {
+				const contentType = image?.mime_type || image?.content_type || "image/png";
+				const source = image?.url || (image?.b64_json ? `data:${contentType};base64,${image.b64_json}` : "");
+				if (!source) return image;
+				cacheImageInBackground(source).catch((error) => {
+					console.error("image cache failed:", error.message);
 				});
-			}
+				return {
+					...image,
+					url: source,
+					sourceUrl: image.url || source
+				};
+			});
 			await appendGenerationRecord({
 				id: Date.now().toString(),
 				createdAt: (/* @__PURE__ */ new Date()).toISOString(),
