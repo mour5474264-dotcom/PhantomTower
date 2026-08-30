@@ -1,18 +1,82 @@
 const BASE = 'http://127.0.0.1:4317'
 
+export function formatApiError(error, fallback = '操作失败') {
+    if (!error) return fallback
+    const details = error.details && typeof error.details === 'object' ? error.details : {}
+    const message = String(error.message || fallback)
+    const lines = [message]
+    const add = (label, value) => {
+        if (value === undefined || value === null || value === '') return
+        const text = typeof value === 'object' ? JSON.stringify(value) : String(value)
+        if (!lines.some((line) => line.includes(text))) lines.push(`${label}：${text}`)
+    }
+    add('错误码', details.code || error.code)
+    add('HTTP', details.status || error.status)
+    add('请求路径', details.path)
+    add('服务端状态', details.health === 'online' ? '在线' : details.health)
+    add('原始 fetch 名称', details.originalName)
+    add('原始 fetch 错误码', details.originalCode)
+    add('原始 fetch 消息', details.originalMessage)
+    add('原始上游错误', details.original)
+    add('上游服务商', details.provider)
+    add('上游地址', details.endpoint)
+    add('服务端建议', details.hint)
+    add('上游原始响应', typeof details.upstream === 'string' ? details.upstream : details.bodyPreview)
+    return lines.join('\n')
+}
+
+function errorDetail(error) {
+    const code = error?.cause?.code || error?.code || ''
+    const message = error?.cause?.message || error?.message || String(error || '')
+    return [code && `代码 ${code}`, message].filter(Boolean).join('：') || '未知网络错误'
+}
+
+async function transportError(path, original) {
+    let health = 'unknown'
+    try {
+        const response = await fetch(`${BASE}/api/health`, {cache: 'no-store'})
+        health = response.ok ? 'online' : `http-${response.status}`
+    } catch {}
+    const prefix = health === 'online'
+        ? '本地数据服务在线，但请求未完成'
+        : '无法连接本地数据服务'
+    const error = new Error(`${prefix}（${path}）：${errorDetail(original)}`)
+    error.code = 'LOCAL_SERVICE_TRANSPORT_ERROR'
+    error.cause = original
+    error.details = {
+        path,
+        base: BASE,
+        health,
+        originalName: original?.name || '',
+        originalCode: original?.cause?.code || original?.code || '',
+        originalMessage: original?.cause?.message || original?.message || String(original || '')
+    }
+    return error
+}
+
 async function request(path, options, fallback) {
     let response
     try {
         response = await fetch(`${BASE}${path}`, options)
     } catch (error) {
         if (error?.name === 'AbortError') throw error
-        throw new Error('本地数据服务未连接，请关闭程序后重新打开')
+        throw await transportError(path, error)
     }
-    const data = await response.json().catch(() => ({}))
+    const raw = await response.text()
+    let data = {}
+    try {
+        data = raw ? JSON.parse(raw) : {}
+    } catch (parseError) {
+        const error = new Error(`${fallback}（HTTP ${response.status}）：本地服务返回了无效 JSON：${raw.slice(0, 300) || parseError.message}`)
+        error.status = response.status
+        error.code = 'LOCAL_SERVICE_INVALID_RESPONSE'
+        error.details = {path, status: response.status, bodyPreview: raw.slice(0, 300)}
+        throw error
+    }
     if (!response.ok) {
         const error = new Error(data.error?.message || data.error || fallback)
         error.status = response.status
-        error.details = data
+        error.details = {...data, path, status: response.status}
         throw error
     }
     return data
@@ -66,6 +130,18 @@ export async function generateImage(input, options = {}) {
     }, '图片生成失败')
 }
 
+export async function getVisionStatus() {
+    return request('/api/vision/status', {cache: 'no-store'}, '本地视觉服务状态读取失败')
+}
+
+export async function generatePersonMask(image, options = {}) {
+    return request('/api/vision/mask', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({image, ...options})
+    }, '人物 mask 生成失败')
+}
+
 export async function cancelGeneration(taskId) {
     if (!taskId) return {ok: false, cancelled: false}
     return request(`/api/generate/cancel?taskId=${encodeURIComponent(taskId)}`, {method: 'POST'}, 'generation cancellation failed')
@@ -113,6 +189,10 @@ export async function getRecords() {
 
 export async function deleteRecord(id) {
     return request(`/api/records/${encodeURIComponent(id)}`, {method: 'DELETE'}, '生成记录删除失败')
+}
+
+export async function deleteAllRecords() {
+    return request('/api/records', {method: 'DELETE'}, '生成记录删除失败')
 }
 
 function shortId() {

@@ -131,6 +131,15 @@
 .page .el-tabs__active-bar { height: 2px; background: #167d70; }
 
 .history-page .record-card { margin-top: 10px; padding: 16px; }
+.history-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; width: 100%; }
+.history-heading h2 { margin-bottom: 7px; }
+.history-heading .muted { margin: 0; }
+.history-heading-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; }
+.history-refresh { color: var(--workspace-primary) !important; border-color: #b8d7d0 !important; background: #f3faf8 !important; }
+.history-refresh:hover:not(:disabled) { color: #fff !important; border-color: var(--workspace-primary) !important; background: var(--workspace-primary) !important; }
+.history-refresh .is-spinning { animation: history-refresh-spin 800ms linear infinite; }
+.history-clear { flex: 0 0 auto; color: #b7463b !important; border-color: #e2b8b2 !important; background: #fff8f7 !important; }
+.history-clear:hover:not(:disabled) { color: #fff !important; border-color: var(--workspace-danger) !important; background: var(--workspace-danger) !important; }
 .history-page .record-meta { color: #33413b; }
 .history-page .record-meta span,
 .history-page .record-card p { color: var(--workspace-muted); }
@@ -140,6 +149,7 @@
 .history-page .record-image-actions button:not(.record-continue) { width: 28px; }
 .history-page .record-image-actions .record-continue { padding: 0 9px; color: #167d70; background: #edf8f5; border-color: #b8d7d0; }
 .history-page .record-image-actions .record-continue:hover:not(:disabled) { color: #fff; background: #167d70; border-color: #167d70; }
+@keyframes history-refresh-spin { to { transform: rotate(360deg); } }
 
 /* Dialogs are teleported outside .page, so their control palette is defined here. */
 .el-dialog { border: 1px solid #cfdad5; border-radius: 4px; background: #f8f9f6; box-shadow: 0 20px 60px rgb(17 24 23 / 20%); }
@@ -158,6 +168,8 @@
 
 @media (max-width: 700px) {
   .page { margin-top: 16px; padding: 16px; }
+  .history-heading { align-items: stretch; flex-direction: column; gap: 10px; }
+  .history-heading-actions { align-self: flex-start; }
   .page .list-head { align-items: flex-start; flex-direction: column; }
   .page .list-head > div:last-child { justify-content: flex-start; }
   .el-dialog { width: calc(100vw - 28px) !important; }

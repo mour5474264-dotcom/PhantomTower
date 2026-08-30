@@ -15,6 +15,7 @@ const files = {
     imageCache: path.join(dataDir, 'image-cache.json')
 }
 const pendingImages = new Map()
+let recordsWriteQueue = Promise.resolve()
 
 async function read(file, fallback) {
     try {
@@ -29,7 +30,21 @@ async function write(file, data) {
     // Multiple generated images can finish together; each write needs its own temporary file.
     const temporary = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`
     await fs.writeFile(temporary, JSON.stringify(data, null, 2), 'utf8')
-    await fs.rename(temporary, file)
+    try {
+        for (let attempt = 0; attempt < 16; attempt += 1) {
+            try {
+                await fs.rename(temporary, file)
+                return
+            } catch (error) {
+                const retryable = ['EPERM', 'EACCES', 'EBUSY'].includes(error.code)
+                if (!retryable || attempt === 15) throw error
+                await new Promise((resolve) => setTimeout(resolve, Math.min(250, 50 * (attempt + 1))))
+            }
+        }
+    } catch (error) {
+        await fs.rm(temporary, {force: true}).catch(() => null)
+        throw error
+    }
 }
 
 function send(res, status, data) {
@@ -111,8 +126,21 @@ async function writeGeneratedImage(filename, buffer) {
     await fs.writeFile(temporary, buffer)
     const saved = await fs.stat(temporary)
     if (!saved.size) throw new Error('generated image is empty')
-    await fs.rename(temporary, file)
-    return file
+    try {
+        for (let attempt = 0; attempt < 16; attempt += 1) {
+            try {
+                await fs.rename(temporary, file)
+                return file
+            } catch (error) {
+                const retryable = ['EPERM', 'EACCES', 'EBUSY'].includes(error.code)
+                if (!retryable || attempt === 15) throw error
+                await new Promise((resolve) => setTimeout(resolve, Math.min(250, 50 * (attempt + 1))))
+            }
+        }
+    } catch (error) {
+        await fs.rm(temporary, {force: true}).catch(() => null)
+        throw error
+    }
 }
 
 async function cachedImage(url) {
@@ -172,6 +200,29 @@ async function persistImage(url) {
         return {filename, contentType: filename.endsWith('.jpg') || filename.endsWith('.jpeg') ? 'image/jpeg' : filename.endsWith('.webp') ? 'image/webp' : 'image/png', file}
     }
     return pendingImages.get(url) || cacheImage(url)
+}
+
+async function externalizeRecordImage(image) {
+    const value = {...(image || {})}
+    const inlineData = typeof value.b64_json === 'string' && value.b64_json
+    if (!inlineData) return value
+    if (!value.url || /^data:image\//i.test(value.url)) {
+        const contentType = value.mime_type || value.content_type || 'image/png'
+        const persisted = await persistImage(`data:${contentType};base64,${inlineData}`)
+        value.url = generatedUrl(persisted.filename)
+    }
+    if (/^data:image\//i.test(String(value.sourceUrl || ''))) delete value.sourceUrl
+    delete value.b64_json
+    return value
+}
+
+function appendGenerationRecord(record) {
+    recordsWriteQueue = recordsWriteQueue.catch(() => null).then(async () => {
+        const records = await read(files.records, [])
+        records.unshift(record)
+        await write(files.records, records.slice(0, 500))
+    })
+    return recordsWriteQueue
 }
 
 async function getDownloadImage(url) {
@@ -316,7 +367,7 @@ http.createServer(async (req, res) => {
                     model: input.model,
                     prompt: input.prompt,
                     n: 1,
-                    quality: input.quality || 'medium',
+                    quality: 'high',
                     response_format: 'url'
                 }
                 if (input.size && input.size !== 'auto') payload.size = input.size
@@ -348,6 +399,16 @@ http.createServer(async (req, res) => {
                 saveImageInBackground(source).catch((error) => console.error('image cache failed:', error.message))
                 return {...image, url: source, sourceUrl: image.url, saving: true}
             })
+            const recordImages = await Promise.all(persistedImages.map(async (image) => ({
+                ...(await externalizeRecordImage(image)),
+                id: crypto.randomUUID()
+            })))
+            const responseImages = persistedImages.map((image, index) => {
+                if (!image?.b64_json || !recordImages[index]?.url) return image
+                const value = {...image, url: recordImages[index].url, sourceUrl: recordImages[index].url}
+                delete value.b64_json
+                return value
+            })
             const record = {
                 id: Date.now().toString(),
                 createdAt: new Date().toISOString(),
@@ -362,12 +423,10 @@ http.createServer(async (req, res) => {
                     }))
                 },
                 responses,
-                images: persistedImages
+                images: recordImages
             }
-            const records = await read(files.records, []);
-            records.unshift(record);
-            await write(files.records, records)
-            return send(res, 200, {created: Date.now(), data: persistedImages})
+            await appendGenerationRecord(record)
+            return send(res, 200, {created: Date.now(), data: responseImages})
         }
         send(res, 404, {error: 'Not found'})
     } catch (error) {

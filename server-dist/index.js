@@ -1,8 +1,392 @@
+import { createRequire } from "node:module";
 import http from "node:http";
 import fs from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
+//#region server/vision/index.js
+var require = createRequire(import.meta.url);
+var MODEL_FILES = {
+	detector: ["person-detector.onnx", "yolov8n.onnx"],
+	encoder: ["sam2-encoder.onnx", "image_encoder.onnx"],
+	decoder: [
+		"sam2-decoder.onnx",
+		"image_decoder.onnx",
+		"decoder.onnx"
+	]
+};
+var runtime;
+var sessions;
+var sharpRuntime;
+function loadPackage(name) {
+	const candidates = [name];
+	if (process.resourcesPath) {
+		candidates.push(path.join(process.resourcesPath, "app.asar", "node_modules", name));
+		candidates.push(path.join(process.resourcesPath, "app", "node_modules", name));
+	}
+	let lastError;
+	for (const candidate of candidates) try {
+		return require(candidate);
+	} catch (error) {
+		lastError = error;
+	}
+	throw lastError || /* @__PURE__ */ new Error(`无法加载 ${name}`);
+}
+function modelDir() {
+	return process.env.PHANTOMTOWER_VISION_MODELS_DIR || path.join(process.cwd(), "vision-models");
+}
+async function modelState() {
+	const directory = modelDir();
+	const resolved = {};
+	for (const [key, names] of Object.entries(MODEL_FILES)) {
+		resolved[key] = null;
+		for (const name of names) if (await fs.access(path.join(directory, name)).then(() => true).catch(() => false)) {
+			resolved[key] = name;
+			break;
+		}
+	}
+	const files = Object.fromEntries(Object.entries(resolved).map(([key, file]) => [key, Boolean(file)]));
+	return {
+		directory,
+		files,
+		modelFiles: resolved,
+		ready: Object.values(files).every(Boolean)
+	};
+}
+async function loadRuntime(state) {
+	if (!state.ready) return null;
+	if (sessions) return sessions;
+	try {
+		runtime = loadPackage("onnxruntime-node");
+		const options = { executionProviders: ["dml", "cpu"] };
+		sessions = {
+			detector: await runtime.InferenceSession.create(path.join(state.directory, resolveModelName(state, "detector")), options),
+			encoder: await runtime.InferenceSession.create(path.join(state.directory, resolveModelName(state, "encoder")), options),
+			decoder: await runtime.InferenceSession.create(path.join(state.directory, resolveModelName(state, "decoder")), options)
+		};
+		return sessions;
+	} catch (error) {
+		sessions = null;
+		runtime = null;
+		const wrapped = /* @__PURE__ */ new Error(`视觉模型加载失败：${error.message}`);
+		wrapped.code = "VISION_MODEL_LOAD_FAILED";
+		throw wrapped;
+	}
+}
+function resolveModelName(state, key) {
+	const names = MODEL_FILES[key] || [];
+	return state.modelFiles?.[key] || names[0];
+}
+function parseDataUrl(value) {
+	const match = String(value || "").match(/^data:([^;]+);base64,(.+)$/s);
+	if (!match) throw Object.assign(/* @__PURE__ */ new Error("图片必须是 base64 data URL"), { code: "INVALID_IMAGE_DATA" });
+	return {
+		mimeType: match[1],
+		buffer: Buffer.from(match[2], "base64")
+	};
+}
+function dataUrl(buffer, mimeType = "image/png") {
+	return `data:${mimeType};base64,${buffer.toString("base64")}`;
+}
+async function imageInfo(image) {
+	const parsed = parseDataUrl(image);
+	sharpRuntime ||= loadPackage("sharp");
+	const metadata = await sharpRuntime(parsed.buffer).metadata();
+	if (!metadata.width || !metadata.height) throw Object.assign(/* @__PURE__ */ new Error("无法读取目标图尺寸"), { code: "INVALID_IMAGE" });
+	return {
+		...parsed,
+		width: metadata.width,
+		height: metadata.height
+	};
+}
+function tensor(runtime, type, data, dims) {
+	return new runtime.Tensor(type, data, dims);
+}
+function sessionInputs(session) {
+	if (Array.isArray(session?.inputs)) return session.inputs;
+	return (session?.inputNames || []).map((name) => ({
+		name,
+		shape: session.inputMetadata?.[name]?.dimensions || session.inputMetadata?.[name]?.shape || []
+	}));
+}
+function sessionOutputs(session) {
+	if (Array.isArray(session?.outputs)) return session.outputs;
+	return (session?.outputNames || []).map((name) => ({ name }));
+}
+function modelInputShape(session, fallback = [
+	1,
+	3,
+	1024,
+	1024
+]) {
+	const shape = sessionInputs(session)[0]?.shape;
+	return Array.isArray(shape) && shape.length === 4 ? shape.map((value, index) => Number.isInteger(value) ? value : fallback[index]) : fallback;
+}
+async function imageTensor(runtime, buffer, session, { normalize = true } = {}) {
+	sharpRuntime ||= loadPackage("sharp");
+	const { info } = await sharpRuntime(buffer).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+	const shape = modelInputShape(session, [
+		1,
+		3,
+		1024,
+		1024
+	]);
+	const height = shape[2];
+	const width = shape[3];
+	const resized = await sharpRuntime(buffer).removeAlpha().resize(width, height, { fit: "fill" }).raw().toBuffer();
+	const plane = width * height;
+	const values = new Float32Array(plane * 3);
+	const mean = normalize ? [
+		.485,
+		.456,
+		.406
+	] : [
+		0,
+		0,
+		0
+	];
+	const std = normalize ? [
+		.229,
+		.224,
+		.225
+	] : [
+		1,
+		1,
+		1
+	];
+	for (let i = 0; i < plane; i += 1) {
+		values[i] = (resized[i * 3] / 255 - mean[0]) / std[0];
+		values[plane + i] = (resized[i * 3 + 1] / 255 - mean[1]) / std[1];
+		values[plane * 2 + i] = (resized[i * 3 + 2] / 255 - mean[2]) / std[2];
+	}
+	return {
+		tensor: tensor(runtime, "float32", values, [
+			1,
+			3,
+			height,
+			width
+		]),
+		width: info.width,
+		height: info.height
+	};
+}
+function sigmoid(value) {
+	return 1 / (1 + Math.exp(-value));
+}
+function probability(value) {
+	return value >= 0 && value <= 1 ? value : sigmoid(value);
+}
+function iou(a, b) {
+	const left = Math.max(a.x1, b.x1);
+	const top = Math.max(a.y1, b.y1);
+	const right = Math.min(a.x2, b.x2);
+	const bottom = Math.min(a.y2, b.y2);
+	const intersection = Math.max(0, right - left) * Math.max(0, bottom - top);
+	const areaA = Math.max(0, a.x2 - a.x1) * Math.max(0, a.y2 - a.y1);
+	const areaB = Math.max(0, b.x2 - b.x1) * Math.max(0, b.y2 - b.y1);
+	return intersection / Math.max(1, areaA + areaB - intersection);
+}
+function detectPeople(runtime, session, output, width, height) {
+	const values = output?.data || output;
+	const dims = output?.dims || [];
+	if (!values || !dims.length) return [];
+	const rows = dims[dims.length - 1] === 84 || dims[dims.length - 1] === 85 ? dims[dims.length - 1] : dims[dims.length - 2];
+	const count = dims[dims.length - 1] === rows ? dims[dims.length - 2] : dims[dims.length - 1];
+	const transposed = dims[dims.length - 1] === rows;
+	const get = (row, column) => Number(values[transposed ? row * rows + column : column * count + row]);
+	const candidates = [];
+	for (let row = 0; row < count; row += 1) {
+		const cx = get(row, 0);
+		const cy = get(row, 1);
+		const w = get(row, 2);
+		const h = get(row, 3);
+		if (![
+			cx,
+			cy,
+			w,
+			h
+		].every(Number.isFinite)) continue;
+		let score = 0;
+		let classIndex = 0;
+		const classStart = rows >= 85 ? 5 : 4;
+		for (let column = classStart; column < rows; column += 1) {
+			const value = get(row, column);
+			if (value > score) {
+				score = value;
+				classIndex = column - classStart;
+			}
+		}
+		score = probability(score) * (rows >= 85 ? probability(get(row, 4)) : 1);
+		if (classIndex !== 0 || score < .35) continue;
+		const scaleX = width / Number(modelInputShape(session)[3]);
+		const scaleY = height / Number(modelInputShape(session)[2]);
+		candidates.push({
+			x1: Math.max(0, (cx - w / 2) * scaleX),
+			y1: Math.max(0, (cy - h / 2) * scaleY),
+			x2: Math.min(width, (cx + w / 2) * scaleX),
+			y2: Math.min(height, (cy + h / 2) * scaleY),
+			score
+		});
+	}
+	candidates.sort((a, b) => b.score - a.score);
+	const kept = [];
+	for (const candidate of candidates) {
+		if (!kept.some((item) => iou(item, candidate) > .55)) kept.push(candidate);
+		if (kept.length >= 8) break;
+	}
+	return kept;
+}
+async function encodeMask(runtime, decoder, embedding, box, width, height) {
+	const encoderSize = modelInputShape(sessions.encoder)[2] || 1024;
+	const coords = new Float32Array([
+		box.x1 / width * encoderSize,
+		box.y1 / height * encoderSize,
+		box.x2 / width * encoderSize,
+		box.y2 / height * encoderSize
+	]);
+	const labels = new Float32Array([2, 3]);
+	const feeds = {};
+	const feature0 = tensor(runtime, "float32", embedding.highRes0, embedding.highRes0Dims);
+	const feature1 = tensor(runtime, "float32", embedding.highRes1, embedding.highRes1Dims);
+	const image = tensor(runtime, "float32", embedding.image, embedding.imageDims);
+	const pointCoords = tensor(runtime, "float32", coords, [
+		1,
+		2,
+		2
+	]);
+	const pointLabels = tensor(runtime, "float32", labels, [1, 2]);
+	const maskInput = tensor(runtime, "float32", /* @__PURE__ */ new Float32Array(65536), [
+		1,
+		1,
+		256,
+		256
+	]);
+	const hasMaskInput = tensor(runtime, "float32", new Float32Array([0]), [1]);
+	const originalSize = tensor(runtime, "int32", new Int32Array([height, width]), [2]);
+	for (const input of sessionInputs(decoder)) {
+		const name = input.name.toLowerCase();
+		if (name.includes("image_embed") || name.includes("image_embedding")) feeds[input.name] = image;
+		else if (name.includes("high_res_feats_0") || name.includes("highres0")) feeds[input.name] = feature0;
+		else if (name.includes("high_res_feats_1") || name.includes("highres1")) feeds[input.name] = feature1;
+		else if (name.includes("point_coords") || name.includes("point_coordinates")) feeds[input.name] = pointCoords;
+		else if (name.includes("point_labels") || name.includes("point_label")) feeds[input.name] = pointLabels;
+		else if (name.includes("has_mask_input") || name.includes("hasmaskinput")) feeds[input.name] = hasMaskInput;
+		else if (name.includes("mask_input") || name.includes("maskinput")) feeds[input.name] = maskInput;
+		else if (name.includes("orig_im_size") || name.includes("original_image_size")) feeds[input.name] = originalSize;
+	}
+	const fallbackValues = [
+		feature0,
+		feature1,
+		image,
+		pointCoords,
+		pointLabels,
+		maskInput,
+		hasMaskInput,
+		originalSize
+	];
+	sessionInputs(decoder).forEach((input, index) => {
+		if (!feeds[input.name]) feeds[input.name] = fallbackValues[index];
+	});
+	const result = await decoder.run(feeds);
+	const output = sessionOutputs(decoder).map((item) => result[item.name]).find((item) => item?.data && item.dims?.length >= 3);
+	if (!output) throw new Error("SAM 2 decoder 没有返回 mask");
+	const maskWidth = Number(output.dims.at(-1));
+	const maskHeight = Number(output.dims.at(-2));
+	const channels = Number(output.dims.at(-3)) || 1;
+	const source = output.data;
+	const alpha = Buffer.alloc(width * height);
+	const channelOffset = channels > 1 ? 0 : 0;
+	for (let y = 0; y < height; y += 1) {
+		const sy = Math.min(maskHeight - 1, Math.floor(y / height * maskHeight));
+		for (let x = 0; x < width; x += 1) {
+			const sx = Math.min(maskWidth - 1, Math.floor(x / width * maskWidth));
+			const value = Number(source[channelOffset * maskWidth * maskHeight + sy * maskWidth + sx]);
+			alpha[y * width + x] = value > 0 || value >= 0 && sigmoid(value) > .5 ? 255 : 0;
+		}
+	}
+	return alpha;
+}
+async function runBundledModels(runtime, loaded, info) {
+	sharpRuntime ||= loadPackage("sharp");
+	const { info: metadata } = await sharpRuntime(info.buffer).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+	const input = await imageTensor(runtime, info.buffer, loaded.detector, { normalize: false });
+	const detectorInput = sessionInputs(loaded.detector)[0].name;
+	const detectorResult = await loaded.detector.run({ [detectorInput]: input.tensor });
+	const detectorOutput = sessionOutputs(loaded.detector).map((item) => detectorResult[item.name]).find((item) => item?.data);
+	const boxes = detectPeople(runtime, loaded.detector, detectorOutput, metadata.width, metadata.height);
+	if (!boxes.length) throw Object.assign(/* @__PURE__ */ new Error("未检测到人物"), { code: "NO_PERSON_DETECTED" });
+	const encoderInput = await imageTensor(runtime, info.buffer, loaded.encoder);
+	const encoded = await loaded.encoder.run({ [sessionInputs(loaded.encoder)[0].name]: encoderInput.tensor });
+	const outputValues = sessionOutputs(loaded.encoder).map((item) => encoded[item.name]);
+	const embedding = {
+		highRes0: outputValues[0].data,
+		highRes0Dims: outputValues[0].dims,
+		highRes1: outputValues[1].data,
+		highRes1Dims: outputValues[1].dims,
+		image: outputValues[2].data,
+		imageDims: outputValues[2].dims
+	};
+	const mask = Buffer.alloc(metadata.width * metadata.height);
+	for (const box of boxes) {
+		const part = await encodeMask(runtime, loaded.decoder, embedding, box, metadata.width, metadata.height);
+		for (let index = 0; index < mask.length; index += 1) mask[index] = Math.max(mask[index], part[index]);
+	}
+	const rgba = Buffer.alloc(mask.length * 4);
+	for (let index = 0; index < mask.length; index += 1) {
+		const offset = index * 4;
+		rgba[offset] = 255;
+		rgba[offset + 1] = 255;
+		rgba[offset + 2] = 255;
+		rgba[offset + 3] = mask[index] > 0 ? 0 : 255;
+	}
+	return {
+		mask: await sharpRuntime(rgba, { raw: {
+			width: metadata.width,
+			height: metadata.height,
+			channels: 4
+		} }).png().toBuffer(),
+		boxes
+	};
+}
+/**
+* The model adapter is deliberately isolated from HTTP and batch orchestration.
+* The shipped ONNX bundle follows the SAM2 encoder/decoder contract. Keeping
+* this boundary small lets us update model weights without changing the app.
+*/
+async function inferPersonMask(info) {
+	const state = await modelState();
+	const loaded = await loadRuntime(state);
+	if (!loaded) {
+		const error = /* @__PURE__ */ new Error("未安装本地人物检测和 SAM 2 模型");
+		error.code = "VISION_MODELS_NOT_INSTALLED";
+		error.models = state;
+		throw error;
+	}
+	return runBundledModels(runtime, loaded, info);
+}
+async function visionStatus() {
+	const state = await modelState();
+	return {
+		ok: true,
+		ready: state.ready,
+		modelDir: state.directory,
+		models: state.files,
+		runtime: Boolean(runtime)
+	};
+}
+async function createPersonMask(image, options = {}) {
+	const info = await imageInfo(image);
+	const result = await inferPersonMask(info, options);
+	if (!result?.mask) throw Object.assign(/* @__PURE__ */ new Error("视觉模型没有返回 mask"), { code: "VISION_EMPTY_MASK" });
+	return {
+		mask: dataUrl(Buffer.isBuffer(result.mask) ? result.mask : Buffer.from(result.mask)),
+		width: info.width,
+		height: info.height,
+		boxes: Array.isArray(result.boxes) ? result.boxes : [],
+		model: "detector+sam2"
+	};
+}
+//#endregion
 //#region server/index.js
 var dataDir = process.env.PHANTOMTOWER_DATA_DIR || path.join(path.dirname(fileURLToPath(import.meta.url)), "../data");
 var generatedDir = path.join(dataDir, "generated");
@@ -119,7 +503,7 @@ async function write(file, data) {
 	const temporary = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
 	try {
 		await fs.writeFile(temporary, JSON.stringify(data, null, 2), "utf8");
-		for (let attempt = 0; attempt < 6; attempt += 1) try {
+		for (let attempt = 0; attempt < 16; attempt += 1) try {
 			await fs.rename(temporary, file);
 			return;
 		} catch (error) {
@@ -127,8 +511,8 @@ async function write(file, data) {
 				"EPERM",
 				"EACCES",
 				"EBUSY"
-			].includes(error.code) || attempt === 5) throw error;
-			await wait(40 * (attempt + 1));
+			].includes(error.code) || attempt === 15) throw error;
+			await wait(Math.min(250, 50 * (attempt + 1)));
 		}
 	} catch (error) {
 		await fs.rm(temporary, { force: true }).catch(() => null);
@@ -219,7 +603,12 @@ async function json(req) {
 	let value = "";
 	for await (const chunk of req) {
 		value += chunk;
-		if (Buffer.byteLength(value, "utf8") > 26214400) throw new Error("请求内容过大");
+		if (Buffer.byteLength(value, "utf8") > 26214400) {
+			const error = /* @__PURE__ */ new Error("请求内容过大（上限 25 MB）");
+			error.status = 413;
+			error.code = "PAYLOAD_TOO_LARGE";
+			throw error;
+		}
 	}
 	return value ? JSON.parse(value) : {};
 }
@@ -240,10 +629,32 @@ function modelWithCapabilities(item) {
 		...sizes?.length ? { supportedSizes: [...new Set(sizes)] } : {}
 	};
 }
+function geminiModelSource(payload) {
+	const candidates = [
+		payload?.models,
+		payload?.data,
+		payload?.model,
+		payload?.data?.models
+	];
+	const source = candidates.find((value) => Array.isArray(value) && value.length) || candidates.find((value) => Array.isArray(value)) || [];
+	return Array.isArray(source) ? source : [];
+}
+function supportsGeminiGeneration(item) {
+	const methods = item?.supportedGenerationMethods || item?.supported_generation_methods;
+	return !Array.isArray(methods) || methods.length === 0 || methods.includes("generateContent");
+}
+function geminiModelWithCapabilities(item) {
+	if (typeof item === "string") return modelWithCapabilities(item);
+	const name = item?.name || item?.id || item?.model || item?.displayName || item?.display_name;
+	return modelWithCapabilities({
+		...item,
+		id: name,
+		name
+	});
+}
 function dataUrlFile(dataUrl, filename = "reference.png") {
-	const match = String(dataUrl || "").match(/^data:([^;]+);base64,(.+)$/s);
-	if (!match) throw new Error("invalid reference image data");
-	return new Blob([Buffer.from(match[2], "base64")], { type: match[1] || "image/png" });
+	const parsed = parseDataUrl(dataUrl);
+	return new Blob([parsed.buffer], { type: parsed.mimeType || "image/png" });
 }
 function referenceFilename(dataUrl, index) {
 	const contentType = String(dataUrl || "").match(/^data:([^;]+);base64,/i)?.[1] || "image/png";
@@ -272,8 +683,83 @@ function apiProvider(api, model = "") {
 	if (endpoint.includes("generativelanguage.googleapis.com") || endpoint.includes("aiplatform.googleapis.com")) return "gemini";
 	return "openai";
 }
+function detectedRoute(api, model = "") {
+	const route = (api?.modelRoutes && typeof api.modelRoutes === "object" ? api.modelRoutes : {})[model] || api?.detectedRoute || {};
+	const provider = String(route.provider || apiProvider(api, model)).toLowerCase();
+	return {
+		provider,
+		protocol: String(route.protocol || (provider === "gemini" ? "gemini-generate-content" : provider === "anthropic" ? "anthropic-messages" : "openai-images")),
+		authType: String(route.authType || (provider === "anthropic" ? "x-api-key" : provider === "gemini" ? "query-key" : "bearer")),
+		imagePath: String(route.imagePath || "/images/generations"),
+		editPath: String(route.editPath || "/images/edits"),
+		confidence: route.confidence || "default"
+	};
+}
+function protocolHeaders(api, route, json = true) {
+	const headers = json ? { "Content-Type": "application/json" } : {};
+	if (route.authType === "x-api-key") {
+		headers["x-api-key"] = api.key;
+		headers["anthropic-version"] = "2023-06-01";
+	} else if (route.authType !== "query-key") headers.Authorization = `Bearer ${api.key}`;
+	return headers;
+}
+function messagesPayload(model, prompt, images = []) {
+	const content = [{
+		type: "text",
+		text: prompt
+	}];
+	for (const image of images) {
+		const inline = dataUrlParts(image);
+		if (inline) content.push({
+			type: "image",
+			source: {
+				type: "base64",
+				media_type: inline.mimeType,
+				data: inline.data
+			}
+		});
+	}
+	return {
+		model,
+		max_tokens: 4096,
+		messages: [{
+			role: "user",
+			content
+		}]
+	};
+}
+function messageImages(result) {
+	const content = result?.content || result?.data?.content || [];
+	const images = content.flatMap((part) => {
+		const data = part?.source?.data || part?.image?.data || part?.data;
+		if (!data || typeof data !== "string") return [];
+		if (/^https?:\/\//i.test(data)) return [{ url: data }];
+		return [{
+			b64_json: data.replace(/^data:[^;]+;base64,/, ""),
+			mime_type: part?.source?.media_type || part?.mime_type || "image/png"
+		}];
+	});
+	const text = content.filter((part) => part?.type === "text" && typeof part.text === "string").map((part) => part.text).join("\n");
+	for (const url of text.match(/https?:\/\/[^\s)\]"']+/gi) || []) images.push({ url });
+	return images;
+}
 function geminiUrl(api, model) {
 	return `${String(api.endpoint || "").trim().replace(/\/+$/, "").replace(/\/v1beta$|\/v1$|\/v1alpha$/i, "")}/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(api.key)}`;
+}
+function safeEndpoint(value) {
+	try {
+		const url = new URL(String(value));
+		for (const key of [
+			"key",
+			"api_key",
+			"apikey",
+			"token",
+			"access_token"
+		]) url.searchParams.delete(key);
+		return url.toString();
+	} catch {
+		return String(value || "").replace(/([?&](?:key|api_key|apikey|token|access_token)=)[^&]*/gi, "$1[已隐藏]");
+	}
 }
 function dataUrlParts(value) {
 	const match = String(value || "").match(/^data:([^;]+);base64,(.+)$/s);
@@ -282,29 +768,160 @@ function dataUrlParts(value) {
 		data: match[2]
 	} : null;
 }
+var GEMINI_ASPECT_RATIOS = [
+	{
+		label: "1:1",
+		value: 1
+	},
+	{
+		label: "2:3",
+		value: 2 / 3
+	},
+	{
+		label: "3:2",
+		value: 3 / 2
+	},
+	{
+		label: "3:4",
+		value: 3 / 4
+	},
+	{
+		label: "4:3",
+		value: 4 / 3
+	},
+	{
+		label: "4:5",
+		value: 4 / 5
+	},
+	{
+		label: "5:4",
+		value: 5 / 4
+	},
+	{
+		label: "9:16",
+		value: 9 / 16
+	},
+	{
+		label: "16:9",
+		value: 16 / 9
+	},
+	{
+		label: "21:9",
+		value: 21 / 9
+	}
+];
+function geminiImageConfig(input) {
+	const config = {};
+	const resolution = String(input?.resolution || "").trim().toUpperCase();
+	if ([
+		"1K",
+		"2K",
+		"4K"
+	].includes(resolution)) config.imageSize = resolution;
+	const requestedAspectRatio = String(input?.aspectRatio || "").trim();
+	if (requestedAspectRatio && requestedAspectRatio.toLowerCase() !== "auto" && GEMINI_ASPECT_RATIOS.some((candidate) => candidate.label === requestedAspectRatio)) config.aspectRatio = requestedAspectRatio;
+	return config;
+}
 function geminiPayload(input, prompt, images) {
 	const parts = [{ text: prompt }];
 	for (const image of images) {
 		const inline = dataUrlParts(image);
 		if (inline) parts.push({ inlineData: inline });
 	}
+	const imageConfig = geminiImageConfig(input);
 	return {
 		contents: [{
 			role: "user",
 			parts
 		}],
-		generationConfig: { responseModalities: ["IMAGE"] }
+		generationConfig: {
+			responseModalities: ["TEXT", "IMAGE"],
+			...Object.keys(imageConfig).length ? { imageConfig } : {}
+		}
 	};
 }
 function geminiImages(result) {
-	return (result?.candidates?.flatMap((candidate) => candidate?.content?.parts || []) || []).filter((part) => part?.inlineData?.data).map((part) => ({
-		b64_json: part.inlineData.data,
-		mime_type: part.inlineData.mimeType || "image/png"
-	}));
+	const images = [];
+	const addImage = (value, fallbackMimeType = "image/png") => {
+		if (!value) return;
+		if (typeof value === "string") {
+			if (/^https?:\/\//i.test(value)) images.push({ url: value });
+			else if (value.trim()) images.push({
+				b64_json: value.replace(/^data:[^;]+;base64,/, ""),
+				mime_type: fallbackMimeType
+			});
+			return;
+		}
+		if (Array.isArray(value)) {
+			value.forEach((item) => addImage(item, fallbackMimeType));
+			return;
+		}
+		if (typeof value !== "object") return;
+		const inline = value.inlineData || value.inline_data;
+		if (inline) {
+			const mimeType = inline.mimeType || inline.mime_type || value.mimeType || value.mime_type || fallbackMimeType;
+			const data = inline.data || inline.base64 || inline.base64Data;
+			if (data) addImage(typeof data === "string" ? data : "", mimeType);
+			return;
+		}
+		const image = value.image || value.imageData || value.image_data;
+		if (image) {
+			addImage(image, value.mime_type || value.mimeType || fallbackMimeType);
+			return;
+		}
+		if (value.images) {
+			addImage(value.images, value.mime_type || value.mimeType || fallbackMimeType);
+			return;
+		}
+		if (value.output && typeof value.output !== "string") {
+			addImage(value.output, value.mime_type || value.mimeType || fallbackMimeType);
+			return;
+		}
+		if (value.data && typeof value.data !== "string") {
+			addImage(value.data, value.mime_type || value.mimeType || fallbackMimeType);
+			return;
+		}
+		const data = value.b64_json || value.base64 || value.base64Data || value.data;
+		const url = value.url || value.image_url?.url || (typeof value.image_url === "string" ? value.image_url : "");
+		if (url) images.push({
+			...value,
+			url
+		});
+		else if (typeof data === "string" && data) images.push({
+			b64_json: data.replace(/^data:[^;]+;base64,/, ""),
+			mime_type: value.mime_type || value.mimeType || fallbackMimeType
+		});
+	};
+	(result?.candidates?.flatMap((candidate) => candidate?.content?.parts || []) || []).forEach((part) => addImage(part));
+	addImage(result?.data);
+	addImage(result?.images);
+	addImage(result?.output);
+	return images;
+}
+function diagnosticValue(value, depth = 0) {
+	if (typeof value === "string") return value.length > 2e3 ? `${value.slice(0, 2e3)}...[截断，共 ${value.length} 字符]` : value;
+	if (value === null || typeof value !== "object") return value;
+	if (depth >= 4) return Array.isArray(value) ? `[数组，${value.length} 项]` : "[对象已截断]";
+	if (Array.isArray(value)) return value.slice(0, 8).map((item) => diagnosticValue(item, depth + 1));
+	return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, /^(?:key|api[_-]?key|token|access[_-]?token|authorization)$/i.test(key) ? "[已隐藏]" : diagnosticValue(item, depth + 1)]));
+}
+function diagnosticCandidateParts(result) {
+	return (result?.candidates || []).flatMap((candidate, candidateIndex) => (candidate?.content?.parts || []).map((part, partIndex) => ({
+		candidateIndex,
+		partIndex,
+		keys: Object.keys(part || {}),
+		types: Object.fromEntries(Object.entries(part || {}).map(([key, value]) => [key, Array.isArray(value) ? "array" : typeof value])),
+		inlineDataKeys: part?.inlineData && typeof part.inlineData === "object" ? Object.keys(part.inlineData) : [],
+		inlineDataLength: typeof part?.inlineData?.data === "string" ? part.inlineData.data.length : 0,
+		snakeInlineDataKeys: part?.inline_data && typeof part.inline_data === "object" ? Object.keys(part.inline_data) : [],
+		snakeInlineDataLength: typeof part?.inline_data?.data === "string" ? part.inline_data.data.length : 0,
+		textPreview: typeof part?.text === "string" ? part.text.slice(0, 300) : ""
+	})));
 }
 function friendlyProviderError(result, status, referenceRequest = false) {
 	const raw = typeof result === "string" ? result : result?.error?.message || result?.error || result?.message || "";
 	const text = String(raw);
+	if (/insufficient\s+(?:account\s+)?balance|余额不足|账户余额不足/i.test(text)) return "中转站账户余额不足，Gemini 请求未执行。请为该中转站充值或更换有余额的 API 配置。";
 	if (status === 400 && /(?:invalid|unsupported|not supported).{0,80}(?:size|dimension|resolution|width|height)|(?:size|dimension|resolution|width|height).{0,80}(?:invalid|unsupported|not supported)/i.test(text)) return "当前模型或中转站不支持所选图片尺寸。请改用 1K（1024x1024），或选择模型支持的尺寸。";
 	if (status === 413) return "图片请求过大，当前模型或中转站无法处理该尺寸或参考图。请改用 1K（1024x1024），或减少参考图数量后重试。";
 	if (/images api.*not supported|image api.*not supported|not supported.*images api/i.test(text)) return referenceRequest ? "当前中转站不支持图片编辑/图生图接口，请确认该平台提供图生图能力，或更换支持参考图的模型。" : "当前中转站不支持图片生成接口，请更换支持图片生成的模型或 API。";
@@ -343,6 +960,15 @@ function deleteGenerationRecord(id) {
 	});
 	return recordsWriteQueue;
 }
+function deleteAllGenerationRecords() {
+	recordsWriteQueue = recordsWriteQueue.catch(() => null).then(async () => {
+		const records = await read(files.records, []);
+		if (!Array.isArray(records) || records.length === 0) return 0;
+		await write(files.records, []);
+		return records.length;
+	});
+	return recordsWriteQueue;
+}
 function appendGenerationOptions(form, payload, input) {
 	form.append("model", String(payload.model));
 	form.append("prompt", String(payload.prompt));
@@ -374,11 +1000,7 @@ async function fetchModels(api) {
 	const payload = await upstreamJson(response, "模型接口");
 	if (provider === "gemini" && response.ok) return {
 		status: 200,
-		payload: { data: (payload.models || []).filter((item) => (item.supportedGenerationMethods || []).includes("generateContent")).map((item) => modelWithCapabilities({
-			...item,
-			id: item.name,
-			name: item.name
-		})) }
+		payload: { data: geminiModelSource(payload).filter(supportsGeminiGeneration).map(geminiModelWithCapabilities) }
 	};
 	if (response.ok) {
 		const source = payload?.data || payload?.models || [];
@@ -427,7 +1049,7 @@ async function detectConnection(api) {
 			imagePath: "",
 			editPath: "",
 			request: () => fetch(`${endpoint.replace(/\/v1beta$|\/v1$|\/v1alpha$/i, "")}/v1beta/models?key=${encodeURIComponent(api.key)}`),
-			models: (payload) => (payload?.models || []).filter((item) => (item.supportedGenerationMethods || []).includes("generateContent"))
+			models: (payload) => geminiModelSource(payload).filter(supportsGeminiGeneration)
 		}
 	];
 	const requested = String(api.provider || "").toLowerCase();
@@ -577,8 +1199,22 @@ async function writeGeneratedImage(filename, buffer) {
 	const temporary = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
 	await fs.writeFile(temporary, buffer);
 	if (!(await fs.stat(temporary)).size) throw new Error("generated image is empty");
-	await fs.rename(temporary, file);
-	return file;
+	try {
+		for (let attempt = 0; attempt < 16; attempt += 1) try {
+			await fs.rename(temporary, file);
+			return file;
+		} catch (error) {
+			if (![
+				"EPERM",
+				"EACCES",
+				"EBUSY"
+			].includes(error.code) || attempt === 15) throw error;
+			await wait(Math.min(250, 50 * (attempt + 1)));
+		}
+	} catch (error) {
+		await fs.rm(temporary, { force: true }).catch(() => null);
+		throw error;
+	}
 }
 async function cachedImage(url) {
 	const entry = (await read(files.imageCache, {}))[cacheKey(url)];
@@ -659,6 +1295,34 @@ function cacheImageInBackground(url) {
 	pendingImages.set(url, task);
 	return task;
 }
+async function externalizeRecordImage(image) {
+	const value = { ...image || {} };
+	const inlineData = typeof value.b64_json === "string" && value.b64_json;
+	if (!inlineData) return value;
+	if (!value.url || /^data:image\//i.test(value.url)) value.url = generatedUrl((await cacheImageInBackground(`data:${value.mime_type || value.content_type || "image/png"};base64,${inlineData}`)).filename);
+	if (/^data:image\//i.test(String(value.sourceUrl || ""))) delete value.sourceUrl;
+	delete value.b64_json;
+	return value;
+}
+async function externalizeInlineRecordImages() {
+	const records = await read(files.records, []);
+	if (!Array.isArray(records)) return;
+	let changed = false;
+	const next = await Promise.all(records.map(async (record) => {
+		const value = record && typeof record === "object" ? { ...record } : record;
+		if (!value || !Array.isArray(value.images)) return value;
+		const images = await Promise.all(value.images.map(async (image) => {
+			if (!image?.b64_json) return image;
+			changed = true;
+			return externalizeRecordImage(image);
+		}));
+		return {
+			...value,
+			images
+		};
+	}));
+	if (changed) await write(files.records, next.slice(0, 500));
+}
 async function getDownloadImage(url) {
 	if (/^data:image\//i.test(url)) {
 		const match = url.match(/^data:([^;]+);base64,(.+)$/s);
@@ -690,7 +1354,13 @@ async function getDownloadImage(url) {
 		contentType: local.contentType
 	};
 }
+try {
+	await externalizeInlineRecordImages();
+} catch (error) {
+	console.error("generation record image migration failed:", error.message);
+}
 await repairStoredImageExtensions();
+var serverPort = Number(process.env.PHANTOMTOWER_PORT || 4317);
 http.createServer(async (req, res) => {
 	res.req = req;
 	if (req.method === "OPTIONS") {
@@ -710,6 +1380,28 @@ http.createServer(async (req, res) => {
 			dataDir,
 			exportDir
 		});
+		if (req.url === "/api/vision/status" && req.method === "GET") return send(res, 200, await visionStatus());
+		if (req.url === "/api/vision/mask" && req.method === "POST") {
+			const input = await json(req);
+			if (!input.image) return send(res, 400, {
+				ok: false,
+				error: "目标图不能为空",
+				code: "INVALID_IMAGE_DATA"
+			});
+			try {
+				return send(res, 200, {
+					ok: true,
+					...await createPersonMask(input.image, input)
+				});
+			} catch (error) {
+				return send(res, error.code === "VISION_MODELS_NOT_INSTALLED" ? 503 : 422, {
+					ok: false,
+					error: error.message,
+					code: error.code || "VISION_FAILED",
+					models: error.models || null
+				});
+			}
+		}
 		if (req.url === "/api/cache/clear" && req.method === "POST") {
 			const entries = await fs.readdir(generatedDir, { withFileTypes: true }).catch(() => []);
 			let removed = 0;
@@ -794,6 +1486,10 @@ http.createServer(async (req, res) => {
 			const records = await read(files.records, []);
 			return send(res, 200, await resolveRecordImages(Array.isArray(records) ? records : []));
 		}
+		if (req.url === "/api/records" && req.method === "DELETE") return send(res, 200, {
+			ok: true,
+			count: await deleteAllGenerationRecords()
+		});
 		const recordMatch = req.url.match(/^\/api\/records\/([^/?]+)$/);
 		if (recordMatch && req.method === "DELETE") {
 			if (!await deleteGenerationRecord(decodeURIComponent(recordMatch[1]))) return send(res, 404, { error: "generation record not found" });
@@ -948,14 +1644,16 @@ http.createServer(async (req, res) => {
 			req.on("aborted", () => controller.abort());
 			const images = [];
 			const responses = [];
+			const debugResponses = [];
 			for (let index = 0; index < Math.max(1, Number(input.n || 1)); index += 1) {
 				if (controller.signal.aborted) break;
-				const provider = apiProvider(api, input.model);
+				const route = detectedRoute(api, input.model);
+				const provider = route.provider;
 				const payload = {
 					model: input.model,
 					prompt: finalPrompt,
 					n: 1,
-					quality: input.quality || "medium",
+					quality: "high",
 					response_format: "url"
 				};
 				if (input.size && input.size !== "auto") payload.size = input.size;
@@ -965,24 +1663,23 @@ http.createServer(async (req, res) => {
 				const referenceImages = requestedImages;
 				if (Array.isArray(input.materials) && input.materials.length) payload.materials = input.materials.map(({ data, ...material }) => material);
 				const isReferenceRequest = referenceImages.length > 0;
-				const imagePath = isReferenceRequest ? "/images/edits" : "/images/generations";
+				const imagePath = isReferenceRequest ? route.editPath : route.imagePath;
 				let body = JSON.stringify(payload);
-				let headers = {
-					"Content-Type": "application/json",
-					Authorization: `Bearer ${api.key}`
-				};
-				if (isReferenceRequest) {
+				let headers = protocolHeaders(api, route);
+				if (route.protocol === "anthropic-messages") body = JSON.stringify(messagesPayload(input.model, finalPrompt, referenceImages));
+				else if (isReferenceRequest && route.protocol === "openai-images") {
 					const form = new FormData();
 					appendGenerationOptions(form, payload, input);
 					for (const [imageIndex, image] of referenceImages.entries()) form.append("image[]", dataUrlFile(image), referenceFilename(image, imageIndex));
+					if (input.mask) form.append("mask", dataUrlFile(input.mask, "person-mask.png"), "person-mask.png");
 					form.append("input_fidelity", "high");
 					body = form;
-					headers = { Authorization: `Bearer ${api.key}` };
+					headers = protocolHeaders(api, route, false);
 				}
 				if (provider === "gemini") {
 					if (isReferenceRequest) body = JSON.stringify(geminiPayload(input, finalPrompt, referenceImages));
 					else body = JSON.stringify(geminiPayload(input, finalPrompt, []));
-					headers = { "Content-Type": "application/json" };
+					headers = protocolHeaders(api, route);
 				}
 				const activeTaskId = String(input.taskId || crypto.randomUUID());
 				activeGenerations.set(activeTaskId, controller);
@@ -999,6 +1696,12 @@ http.createServer(async (req, res) => {
 				} catch (error) {
 					return send(res, 504, {
 						error: upstreamFetchError(error, "图片生成接口", input.size),
+						code: String(error?.cause?.code || error?.code || "UPSTREAM_FETCH_ERROR"),
+						original: {
+							name: error?.name || "",
+							code: error?.cause?.code || error?.code || "",
+							message: error?.cause?.message || error?.message || ""
+						},
 						provider,
 						hint: `本次请求尺寸为 ${input.size || "默认尺寸"}；请确认当前模型支持该尺寸。`
 					});
@@ -1010,9 +1713,11 @@ http.createServer(async (req, res) => {
 				} catch (error) {
 					return send(res, response.ok ? 502 : response.status, {
 						error: error.message,
+						code: error.code || "UPSTREAM_RESPONSE_ERROR",
 						generationAcceptedUnknown: error.code === "UPSTREAM_524",
 						provider,
-						endpoint: provider === "gemini" ? geminiUrl(api, input.model) : apiUrl(api.endpoint, imagePath),
+						endpoint: safeEndpoint(provider === "gemini" ? geminiUrl(api, input.model) : apiUrl(api.endpoint, imagePath)),
+						upstream: diagnosticValue(result),
 						hint: isReferenceRequest ? "当前请求包含参考图，请确认该平台支持图生图接口或 Gemini 图片输入。" : "请确认接口地址是 API 根地址，而不是网站首页。"
 					});
 				}
@@ -1039,18 +1744,57 @@ http.createServer(async (req, res) => {
 					} catch (error) {
 						return send(res, response.ok ? 502 : response.status, {
 							error: error.message,
+							code: error.code || "UPSTREAM_RESPONSE_ERROR",
 							generationAcceptedUnknown: error.code === "UPSTREAM_524",
 							provider: "gemini",
-							endpoint: geminiUrl(api, input.model),
+							endpoint: safeEndpoint(geminiUrl(api, input.model)),
+							upstream: diagnosticValue(result),
 							hint: "中转站不支持 OpenAI Images API，且 Gemini 原生接口也未返回 JSON，请核对该中转站的 Gemini 接口地址。"
 						});
 					}
 				}
 				if (!response.ok) return send(res, response.status, {
 					error: friendlyProviderError(result, response.status, isReferenceRequest),
-					provider: responseProvider
+					code: `UPSTREAM_HTTP_${response.status}`,
+					status: response.status,
+					provider: responseProvider,
+					endpoint: safeEndpoint(responseProvider === "gemini" ? geminiUrl(api, input.model) : apiUrl(api.endpoint, imagePath)),
+					upstream: diagnosticValue(result),
+					hint: isReferenceRequest ? "当前请求包含参考图，请确认模型支持人物替换/图生图，并检查参考图尺寸。" : `当前请求尺寸为 ${input.size || "默认尺寸"}；请确认模型支持该尺寸。`
 				});
-				const normalizedData = responseProvider === "gemini" ? geminiImages(result) : result.data || [];
+				const normalizedData = responseProvider === "gemini" ? geminiImages(result) : route.protocol === "anthropic-messages" ? messageImages(result) : result.data || [];
+				if (input.debug) {
+					let maskBytes = 0;
+					if (input.mask && isReferenceRequest && route.protocol === "openai-images") try {
+						maskBytes = parseDataUrl(input.mask).buffer.length;
+					} catch {
+						maskBytes = 0;
+					}
+					debugResponses.push({
+						iteration: index + 1,
+						provider: responseProvider,
+						protocol: route.protocol,
+						imageConfig: responseProvider === "gemini" ? geminiImageConfig(input) : null,
+						editPath: imagePath,
+						requestBody: body instanceof FormData ? "multipart/form-data" : "application/json",
+						maskAttached: Boolean(maskBytes),
+						maskBytes,
+						httpStatus: response.status,
+						responseKeys: result && typeof result === "object" ? Object.keys(result) : [],
+						normalizedImageCount: normalizedData.length,
+						candidateParts: diagnosticCandidateParts(result),
+						upstream: diagnosticValue(result)
+					});
+				}
+				if (!normalizedData.length) return send(res, 502, {
+					error: "图片接口返回成功，但响应中没有可识别的图片数据",
+					code: "UPSTREAM_NO_IMAGE_DATA",
+					provider: responseProvider,
+					endpoint: safeEndpoint(responseProvider === "gemini" ? geminiUrl(api, input.model) : apiUrl(api.endpoint, imagePath)),
+					responseKeys: result && typeof result === "object" ? Object.keys(result) : [],
+					hint: "请检查中转站是否返回 inlineData/inline_data、data[].b64_json 或图片 URL。",
+					upstream: diagnosticValue(result)
+				});
 				responses.push({
 					usage: result.usage || null,
 					revisedPrompts: normalizedData.map((item) => item.revised_prompt).filter(Boolean)
@@ -1070,6 +1814,23 @@ http.createServer(async (req, res) => {
 					url: source,
 					sourceUrl: image.url || source
 				};
+			});
+			const recordImages = await Promise.all(persistedImages.map(async (image) => ({
+				...await externalizeRecordImage(image),
+				id: crypto.randomUUID(),
+				taskId: input.taskId || null,
+				parentResultId: input.parentResultId || null,
+				version: Math.max(1, Number(input.version || 1))
+			})));
+			const responseImages = persistedImages.map((image, index) => {
+				if (!image?.b64_json || !recordImages[index]?.url) return image;
+				const value = {
+					...image,
+					url: recordImages[index].url,
+					sourceUrl: recordImages[index].url
+				};
+				delete value.b64_json;
+				return value;
 			});
 			await appendGenerationRecord({
 				id: Date.now().toString(),
@@ -1092,23 +1853,31 @@ http.createServer(async (req, res) => {
 					}))
 				},
 				responses,
-				images: persistedImages.map((image) => ({
-					...image,
-					id: crypto.randomUUID(),
-					taskId: input.taskId || null,
-					parentResultId: input.parentResultId || null,
-					version: Math.max(1, Number(input.version || 1))
-				}))
+				images: recordImages
 			});
-			return send(res, 200, {
+			const payload = {
 				created: Date.now(),
-				data: persistedImages
-			});
+				data: responseImages
+			};
+			if (input.debug) payload.debug = {
+				note: "仅用于排查，字符串最长 2000 字符，深度和数组长度均有限制",
+				requestedModel: input.model,
+				provider: debugResponses[debugResponses.length - 1]?.provider || null,
+				normalizedImageCount: images.length,
+				responses: debugResponses
+			};
+			return send(res, 200, payload);
 		}
 		send(res, 404, { error: "Not found" });
 	} catch (error) {
-		if (error.name !== "AbortError") send(res, 500, { error: error.message });
+		if (error.name !== "AbortError") {
+			console.error(`[${req.method} ${req.url}] ${error.stack || error.message}`);
+			send(res, error.status || 500, {
+				error: error.message,
+				code: error.code || "LOCAL_SERVER_ERROR"
+			});
+		}
 	}
-}).listen(4317, "127.0.0.1", () => console.log("PhantomTower local server: http://127.0.0.1:4317"));
+}).listen(serverPort, "127.0.0.1", () => console.log(`PhantomTower local server: http://127.0.0.1:${serverPort}`));
 //#endregion
 export {};

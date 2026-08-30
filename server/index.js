@@ -3,6 +3,7 @@ import fs from 'node:fs/promises'
 import path from 'node:path'
 import crypto from 'node:crypto'
 import {fileURLToPath} from 'node:url'
+import {createPersonMask, visionStatus, parseDataUrl} from './vision/index.js'
 
 const dataDir = process.env.PHANTOMTOWER_DATA_DIR || path.join(path.dirname(fileURLToPath(import.meta.url)), '../data')
 const generatedDir = path.join(dataDir, 'generated')
@@ -109,14 +110,16 @@ async function write(file, data) {
     const temporary = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`
     try {
         await fs.writeFile(temporary, JSON.stringify(data, null, 2), 'utf8')
-        for (let attempt = 0; attempt < 6; attempt += 1) {
+        // Windows may briefly deny replacing a file while Defender, an indexer,
+        // or the renderer still has the previous handle open.
+        for (let attempt = 0; attempt < 16; attempt += 1) {
             try {
                 await fs.rename(temporary, file)
                 return
             } catch (error) {
                 const retryable = ['EPERM', 'EACCES', 'EBUSY'].includes(error.code)
-                if (!retryable || attempt === 5) throw error
-                await wait(40 * (attempt + 1))
+                if (!retryable || attempt === 15) throw error
+                await wait(Math.min(250, 50 * (attempt + 1)))
             }
         }
     } catch (error) {
@@ -182,7 +185,12 @@ async function json(req) {
     let value = '';
     for await (const chunk of req) {
         value += chunk
-        if (Buffer.byteLength(value, 'utf8') > 25 * 1024 * 1024) throw new Error('请求内容过大')
+        if (Buffer.byteLength(value, 'utf8') > 25 * 1024 * 1024) {
+            const error = new Error('请求内容过大（上限 25 MB）')
+            error.status = 413
+            error.code = 'PAYLOAD_TOO_LARGE'
+            throw error
+        }
     }
     return value ? JSON.parse(value) : {}
 }
@@ -215,10 +223,30 @@ function modelWithCapabilities(item) {
     }
 }
 
+function geminiModelSource(payload) {
+    const candidates = [payload?.models, payload?.data, payload?.model, payload?.data?.models]
+    const source = candidates.find((value) => Array.isArray(value) && value.length)
+        || candidates.find((value) => Array.isArray(value))
+        || []
+    return Array.isArray(source) ? source : []
+}
+
+function supportsGeminiGeneration(item) {
+    const methods = item?.supportedGenerationMethods || item?.supported_generation_methods
+    // Relays often omit capability metadata. Do not discard a model merely
+    // because the optional field is absent; only filter explicit non-support.
+    return !Array.isArray(methods) || methods.length === 0 || methods.includes('generateContent')
+}
+
+function geminiModelWithCapabilities(item) {
+    if (typeof item === 'string') return modelWithCapabilities(item)
+    const name = item?.name || item?.id || item?.model || item?.displayName || item?.display_name
+    return modelWithCapabilities({...item, id: name, name})
+}
+
 function dataUrlFile(dataUrl, filename = 'reference.png') {
-    const match = String(dataUrl || '').match(/^data:([^;]+);base64,(.+)$/s)
-    if (!match) throw new Error('invalid reference image data')
-    return new Blob([Buffer.from(match[2], 'base64')], {type: match[1] || 'image/png'})
+    const parsed = parseDataUrl(dataUrl)
+    return new Blob([parsed.buffer], {type: parsed.mimeType || 'image/png'})
 }
 
 function referenceFilename(dataUrl, index) {
@@ -268,7 +296,7 @@ function detectedRoute(api, model = '') {
     const provider = String(route.provider || apiProvider(api, model)).toLowerCase()
     return {
         provider,
-        protocol: String(route.protocol || (provider === 'gemini' ? 'gemini-generate-content' : 'openai-images')),
+        protocol: String(route.protocol || (provider === 'gemini' ? 'gemini-generate-content' : provider === 'anthropic' ? 'anthropic-messages' : 'openai-images')),
         authType: String(route.authType || (provider === 'anthropic' ? 'x-api-key' : provider === 'gemini' ? 'query-key' : 'bearer')),
         imagePath: String(route.imagePath || '/images/generations'),
         editPath: String(route.editPath || '/images/edits'),
@@ -315,9 +343,47 @@ function geminiUrl(api, model) {
     return `${root}/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(api.key)}`
 }
 
+function safeEndpoint(value) {
+    try {
+        const url = new URL(String(value))
+        for (const key of ['key', 'api_key', 'apikey', 'token', 'access_token']) url.searchParams.delete(key)
+        return url.toString()
+    } catch {
+        return String(value || '').replace(/([?&](?:key|api_key|apikey|token|access_token)=)[^&]*/ig, '$1[已隐藏]')
+    }
+}
+
 function dataUrlParts(value) {
     const match = String(value || '').match(/^data:([^;]+);base64,(.+)$/s)
     return match ? {mimeType: match[1], data: match[2]} : null
+}
+
+const GEMINI_ASPECT_RATIOS = [
+    {label: '1:1', value: 1},
+    {label: '2:3', value: 2 / 3},
+    {label: '3:2', value: 3 / 2},
+    {label: '3:4', value: 3 / 4},
+    {label: '4:3', value: 4 / 3},
+    {label: '4:5', value: 4 / 5},
+    {label: '5:4', value: 5 / 4},
+    {label: '9:16', value: 9 / 16},
+    {label: '16:9', value: 16 / 9},
+    {label: '21:9', value: 21 / 9}
+]
+
+function geminiImageConfig(input) {
+    // Gemini uses an image quality tier plus an allowlisted aspect ratio;
+    // arbitrary width/height pairs are not part of the native API.
+    const config = {}
+    const resolution = String(input?.resolution || '').trim().toUpperCase()
+    if (['1K', '2K', '4K'].includes(resolution)) config.imageSize = resolution
+
+    const requestedAspectRatio = String(input?.aspectRatio || '').trim()
+    if (requestedAspectRatio && requestedAspectRatio.toLowerCase() !== 'auto'
+        && GEMINI_ASPECT_RATIOS.some((candidate) => candidate.label === requestedAspectRatio)) {
+        config.aspectRatio = requestedAspectRatio
+    }
+    return config
 }
 
 function geminiPayload(input, prompt, images) {
@@ -326,23 +392,108 @@ function geminiPayload(input, prompt, images) {
         const inline = dataUrlParts(image)
         if (inline) parts.push({inlineData: inline})
     }
+    const imageConfig = geminiImageConfig(input)
     return {
         contents: [{role: 'user', parts}],
-        generationConfig: {responseModalities: ['IMAGE']}
+        generationConfig: {
+            // Match the native Gemini image examples: the model may return a
+            // short text explanation alongside the generated inline image.
+            responseModalities: ['TEXT', 'IMAGE'],
+            ...(Object.keys(imageConfig).length ? {imageConfig} : {})
+        }
     }
 }
 
 function geminiImages(result) {
+    const images = []
+    const addImage = (value, fallbackMimeType = 'image/png') => {
+        if (!value) return
+        if (typeof value === 'string') {
+            if (/^https?:\/\//i.test(value)) images.push({url: value})
+            else if (value.trim()) images.push({b64_json: value.replace(/^data:[^;]+;base64,/, ''), mime_type: fallbackMimeType})
+            return
+        }
+        if (Array.isArray(value)) {
+            value.forEach((item) => addImage(item, fallbackMimeType))
+            return
+        }
+        if (typeof value !== 'object') return
+        const inline = value.inlineData || value.inline_data
+        if (inline) {
+            const mimeType = inline.mimeType || inline.mime_type || value.mimeType || value.mime_type || fallbackMimeType
+            const data = inline.data || inline.base64 || inline.base64Data
+            if (data) addImage(typeof data === 'string' ? data : '', mimeType)
+            return
+        }
+        const image = value.image || value.imageData || value.image_data
+        if (image) {
+            addImage(image, value.mime_type || value.mimeType || fallbackMimeType)
+            return
+        }
+        if (value.images) {
+            addImage(value.images, value.mime_type || value.mimeType || fallbackMimeType)
+            return
+        }
+        if (value.output && typeof value.output !== 'string') {
+            addImage(value.output, value.mime_type || value.mimeType || fallbackMimeType)
+            return
+        }
+        if (value.data && typeof value.data !== 'string') {
+            addImage(value.data, value.mime_type || value.mimeType || fallbackMimeType)
+            return
+        }
+        const data = value.b64_json || value.base64 || value.base64Data || value.data
+        const url = value.url || value.image_url?.url || (typeof value.image_url === 'string' ? value.image_url : '')
+        if (url) images.push({...value, url})
+        else if (typeof data === 'string' && data) images.push({b64_json: data.replace(/^data:[^;]+;base64,/, ''), mime_type: value.mime_type || value.mimeType || fallbackMimeType})
+    }
+
     const parts = result?.candidates?.flatMap((candidate) => candidate?.content?.parts || []) || []
-    return parts.filter((part) => part?.inlineData?.data).map((part) => ({
-        b64_json: part.inlineData.data,
-        mime_type: part.inlineData.mimeType || 'image/png'
-    }))
+    parts.forEach((part) => addImage(part))
+    // Gemini-compatible relays sometimes return OpenAI-style data arrays.
+    addImage(result?.data)
+    addImage(result?.images)
+    addImage(result?.output)
+    return images
+}
+
+// Keep temporary generation diagnostics useful without dumping full image data
+// (or other very large upstream fields) into the renderer console.
+function diagnosticValue(value, depth = 0) {
+    if (typeof value === 'string') {
+        return value.length > 2000 ? `${value.slice(0, 2000)}...[截断，共 ${value.length} 字符]` : value
+    }
+    if (value === null || typeof value !== 'object') return value
+    if (depth >= 4) return Array.isArray(value) ? `[数组，${value.length} 项]` : '[对象已截断]'
+    if (Array.isArray(value)) return value.slice(0, 8).map((item) => diagnosticValue(item, depth + 1))
+    return Object.fromEntries(Object.entries(value).map(([key, item]) => [
+        key,
+        /^(?:key|api[_-]?key|token|access[_-]?token|authorization)$/i.test(key) ? '[已隐藏]' : diagnosticValue(item, depth + 1)
+    ]))
+}
+
+function diagnosticCandidateParts(result) {
+    return (result?.candidates || []).flatMap((candidate, candidateIndex) =>
+        (candidate?.content?.parts || []).map((part, partIndex) => ({
+            candidateIndex,
+            partIndex,
+            keys: Object.keys(part || {}),
+            types: Object.fromEntries(Object.entries(part || {}).map(([key, value]) => [key, Array.isArray(value) ? 'array' : typeof value])),
+            inlineDataKeys: part?.inlineData && typeof part.inlineData === 'object' ? Object.keys(part.inlineData) : [],
+            inlineDataLength: typeof part?.inlineData?.data === 'string' ? part.inlineData.data.length : 0,
+            snakeInlineDataKeys: part?.inline_data && typeof part.inline_data === 'object' ? Object.keys(part.inline_data) : [],
+            snakeInlineDataLength: typeof part?.inline_data?.data === 'string' ? part.inline_data.data.length : 0,
+            textPreview: typeof part?.text === 'string' ? part.text.slice(0, 300) : ''
+        }))
+    )
 }
 
 function friendlyProviderError(result, status, referenceRequest = false) {
     const raw = typeof result === 'string' ? result : (result?.error?.message || result?.error || result?.message || '')
     const text = String(raw)
+    if (/insufficient\s+(?:account\s+)?balance|余额不足|账户余额不足/i.test(text)) {
+        return '中转站账户余额不足，Gemini 请求未执行。请为该中转站充值或更换有余额的 API 配置。'
+    }
     if (status === 400 && /(?:invalid|unsupported|not supported).{0,80}(?:size|dimension|resolution|width|height)|(?:size|dimension|resolution|width|height).{0,80}(?:invalid|unsupported|not supported)/i.test(text)) {
         return '当前模型或中转站不支持所选图片尺寸。请改用 1K（1024x1024），或选择模型支持的尺寸。'
     }
@@ -394,6 +545,16 @@ function deleteGenerationRecord(id) {
     return recordsWriteQueue
 }
 
+function deleteAllGenerationRecords() {
+    recordsWriteQueue = recordsWriteQueue.catch(() => null).then(async () => {
+        const records = await read(files.records, [])
+        if (!Array.isArray(records) || records.length === 0) return 0
+        await write(files.records, [])
+        return records.length
+    })
+    return recordsWriteQueue
+}
+
 function appendGenerationOptions(form, payload, input) {
     form.append('model', String(payload.model))
     form.append('prompt', String(payload.prompt))
@@ -427,9 +588,9 @@ async function fetchModels(api) {
         : await fetch(apiUrl(api.endpoint, 'models'), {headers: {Authorization: `Bearer ${api.key}`}})
     const payload = await upstreamJson(response, '模型接口')
     if (provider === 'gemini' && response.ok) {
-        const models = (payload.models || [])
-            .filter((item) => (item.supportedGenerationMethods || []).includes('generateContent'))
-            .map((item) => modelWithCapabilities({...item, id: item.name, name: item.name}))
+        const models = geminiModelSource(payload)
+            .filter(supportsGeminiGeneration)
+            .map(geminiModelWithCapabilities)
         return {status: 200, payload: {data: models}}
     }
     if (response.ok) {
@@ -456,7 +617,7 @@ async function detectConnection(api) {
         {
             provider: 'gemini', protocol: 'gemini-generate-content', authType: 'query-key', imagePath: '', editPath: '',
             request: () => fetch(`${endpoint.replace(/\/v1beta$|\/v1$|\/v1alpha$/i, '')}/v1beta/models?key=${encodeURIComponent(api.key)}`),
-            models: (payload) => (payload?.models || []).filter((item) => (item.supportedGenerationMethods || []).includes('generateContent'))
+            models: (payload) => geminiModelSource(payload).filter(supportsGeminiGeneration)
         }
     ]
     const requested = String(api.provider || '').toLowerCase()
@@ -613,8 +774,21 @@ async function writeGeneratedImage(filename, buffer) {
     await fs.writeFile(temporary, buffer)
     const saved = await fs.stat(temporary)
     if (!saved.size) throw new Error('generated image is empty')
-    await fs.rename(temporary, file)
-    return file
+    try {
+        for (let attempt = 0; attempt < 16; attempt += 1) {
+            try {
+                await fs.rename(temporary, file)
+                return file
+            } catch (error) {
+                const retryable = ['EPERM', 'EACCES', 'EBUSY'].includes(error.code)
+                if (!retryable || attempt === 15) throw error
+                await wait(Math.min(250, 50 * (attempt + 1)))
+            }
+        }
+    } catch (error) {
+        await fs.rm(temporary, {force: true}).catch(() => null)
+        throw error
+    }
 }
 
 async function cachedImage(url) {
@@ -684,6 +858,40 @@ function cacheImageInBackground(url) {
     return task
 }
 
+async function externalizeRecordImage(image) {
+    const value = {...(image || {})}
+    const inlineData = typeof value.b64_json === 'string' && value.b64_json
+    if (!inlineData) return value
+    // Gemini and some Anthropic relays return image bytes inline. Keep those
+    // bytes out of generation-records.json; the record only needs a stable URL.
+    if (!value.url || /^data:image\//i.test(value.url)) {
+        const contentType = value.mime_type || value.content_type || 'image/png'
+        const source = `data:${contentType};base64,${inlineData}`
+        const persisted = await cacheImageInBackground(source)
+        value.url = generatedUrl(persisted.filename)
+    }
+    if (/^data:image\//i.test(String(value.sourceUrl || ''))) delete value.sourceUrl
+    delete value.b64_json
+    return value
+}
+
+async function externalizeInlineRecordImages() {
+    const records = await read(files.records, [])
+    if (!Array.isArray(records)) return
+    let changed = false
+    const next = await Promise.all(records.map(async (record) => {
+        const value = record && typeof record === 'object' ? {...record} : record
+        if (!value || !Array.isArray(value.images)) return value
+        const images = await Promise.all(value.images.map(async (image) => {
+            if (!image?.b64_json) return image
+            changed = true
+            return externalizeRecordImage(image)
+        }))
+        return {...value, images}
+    }))
+    if (changed) await write(files.records, next.slice(0, 500))
+}
+
 async function getDownloadImage(url) {
     if (/^data:image\//i.test(url)) {
         const match = url.match(/^data:([^;]+);base64,(.+)$/s)
@@ -706,8 +914,14 @@ async function getDownloadImage(url) {
     return {buffer: await fs.readFile(local.file), contentType: local.contentType}
 }
 
+try {
+    await externalizeInlineRecordImages()
+} catch (error) {
+    console.error('generation record image migration failed:', error.message)
+}
 await repairStoredImageExtensions()
 
+const serverPort = Number(process.env.PHANTOMTOWER_PORT || 4317)
 http.createServer(async (req, res) => {
     res.req = req
     if (req.method === 'OPTIONS') {
@@ -718,6 +932,17 @@ http.createServer(async (req, res) => {
     }
     try {
         if (req.url === '/api/health' && req.method === 'GET') return send(res, 200, {ok: true, dataDir, exportDir})
+        if (req.url === '/api/vision/status' && req.method === 'GET') return send(res, 200, await visionStatus())
+        if (req.url === '/api/vision/mask' && req.method === 'POST') {
+            const input = await json(req)
+            if (!input.image) return send(res, 400, {ok: false, error: '目标图不能为空', code: 'INVALID_IMAGE_DATA'})
+            try {
+                return send(res, 200, {ok: true, ...(await createPersonMask(input.image, input))})
+            } catch (error) {
+                const status = error.code === 'VISION_MODELS_NOT_INSTALLED' ? 503 : 422
+                return send(res, status, {ok: false, error: error.message, code: error.code || 'VISION_FAILED', models: error.models || null})
+            }
+        }
         if (req.url === '/api/cache/clear' && req.method === 'POST') {
             const entries = await fs.readdir(generatedDir, {withFileTypes: true}).catch(() => [])
             let removed = 0
@@ -801,6 +1026,10 @@ http.createServer(async (req, res) => {
         if (req.url === '/api/records' && req.method === 'GET') {
             const records = await read(files.records, [])
             return send(res, 200, await resolveRecordImages(Array.isArray(records) ? records : []))
+        }
+        if (req.url === '/api/records' && req.method === 'DELETE') {
+            const count = await deleteAllGenerationRecords()
+            return send(res, 200, {ok: true, count})
         }
         const recordMatch = req.url.match(/^\/api\/records\/([^/?]+)$/)
         if (recordMatch && req.method === 'DELETE') {
@@ -936,14 +1165,16 @@ http.createServer(async (req, res) => {
             req.on('aborted', () => controller.abort())
             const images = []
             const responses = []
+            const debugResponses = []
             for (let index = 0; index < Math.max(1, Number(input.n || 1)); index += 1) {
                 if (controller.signal.aborted) break
-                const provider = apiProvider(api, input.model)
+                const route = detectedRoute(api, input.model)
+                const provider = route.provider
                 const payload = {
                     model: input.model,
                     prompt: finalPrompt,
                     n: 1,
-                    quality: input.quality || 'medium',
+                    quality: 'high',
                     response_format: 'url'
                 }
                 if (input.size && input.size !== 'auto') payload.size = input.size
@@ -955,18 +1186,24 @@ http.createServer(async (req, res) => {
                     payload.materials = input.materials.map(({data, ...material}) => material)
                 }
                 const isReferenceRequest = referenceImages.length > 0
-                const imagePath = isReferenceRequest ? '/images/edits' : '/images/generations'
+                const imagePath = isReferenceRequest ? route.editPath : route.imagePath
                 let body = JSON.stringify(payload)
-                let headers = {'Content-Type': 'application/json', Authorization: `Bearer ${api.key}`}
-                if (isReferenceRequest) {
+                let headers = protocolHeaders(api, route)
+                if (route.protocol === 'anthropic-messages') {
+                    // The connection test records Anthropic relays as Messages APIs.
+                    // Keep generation on that protocol instead of sending an
+                    // OpenAI Images request to the same endpoint.
+                    body = JSON.stringify(messagesPayload(input.model, finalPrompt, referenceImages))
+                } else if (isReferenceRequest && route.protocol === 'openai-images') {
                     const form = new FormData()
                     appendGenerationOptions(form, payload, input)
                     for (const [imageIndex, image] of referenceImages.entries()) {
                         form.append('image[]', dataUrlFile(image), referenceFilename(image, imageIndex))
                     }
+                    if (input.mask) form.append('mask', dataUrlFile(input.mask, 'person-mask.png'), 'person-mask.png')
                     form.append('input_fidelity', 'high')
                     body = form
-                    headers = {Authorization: `Bearer ${api.key}`}
+                    headers = protocolHeaders(api, route, false)
                 }
                 if (provider === 'gemini') {
                     if (isReferenceRequest) {
@@ -975,7 +1212,7 @@ http.createServer(async (req, res) => {
                     } else {
                         body = JSON.stringify(geminiPayload(input, finalPrompt, []))
                     }
-                    headers = {'Content-Type': 'application/json'}
+                    headers = protocolHeaders(api, route)
                 }
                 const activeTaskId = String(input.taskId || crypto.randomUUID())
                 activeGenerations.set(activeTaskId, controller)
@@ -989,6 +1226,8 @@ http.createServer(async (req, res) => {
                 } catch (error) {
                     return send(res, 504, {
                         error: upstreamFetchError(error, '图片生成接口', input.size),
+                        code: String(error?.cause?.code || error?.code || 'UPSTREAM_FETCH_ERROR'),
+                        original: {name: error?.name || '', code: error?.cause?.code || error?.code || '', message: error?.cause?.message || error?.message || ''},
                         provider,
                         hint: `本次请求尺寸为 ${input.size || '默认尺寸'}；请确认当前模型支持该尺寸。`
                     })
@@ -998,13 +1237,15 @@ http.createServer(async (req, res) => {
                 try {
                     result = await upstreamJson(response, `${provider} 图片接口`)
                 } catch (error) {
-                    return send(res, response.ok ? 502 : response.status, {
-                        error: error.message,
-                        generationAcceptedUnknown: error.code === 'UPSTREAM_524',
-                        provider,
-                        endpoint: provider === 'gemini' ? geminiUrl(api, input.model) : apiUrl(api.endpoint, imagePath),
-                        hint: isReferenceRequest ? '当前请求包含参考图，请确认该平台支持图生图接口或 Gemini 图片输入。' : '请确认接口地址是 API 根地址，而不是网站首页。'
-                    })
+                        return send(res, response.ok ? 502 : response.status, {
+                            error: error.message,
+                            code: error.code || 'UPSTREAM_RESPONSE_ERROR',
+                            generationAcceptedUnknown: error.code === 'UPSTREAM_524',
+                            provider,
+                            endpoint: safeEndpoint(provider === 'gemini' ? geminiUrl(api, input.model) : apiUrl(api.endpoint, imagePath)),
+                            upstream: diagnosticValue(result),
+                            hint: isReferenceRequest ? '当前请求包含参考图，请确认该平台支持图生图接口或 Gemini 图片输入。' : '请确认接口地址是 API 根地址，而不是网站首页。'
+                        })
                 }
                 const errorText = JSON.stringify(result).toLowerCase()
                 const canRetryGemini = provider === 'openai'
@@ -1029,11 +1270,55 @@ http.createServer(async (req, res) => {
                     try {
                         result = await upstreamJson(response, 'Gemini 回退接口')
                     } catch (error) {
-                        return send(res, response.ok ? 502 : response.status, {error: error.message, generationAcceptedUnknown: error.code === 'UPSTREAM_524', provider: 'gemini', endpoint: geminiUrl(api, input.model), hint: '中转站不支持 OpenAI Images API，且 Gemini 原生接口也未返回 JSON，请核对该中转站的 Gemini 接口地址。'})
+                        return send(res, response.ok ? 502 : response.status, {error: error.message, code: error.code || 'UPSTREAM_RESPONSE_ERROR', generationAcceptedUnknown: error.code === 'UPSTREAM_524', provider: 'gemini', endpoint: safeEndpoint(geminiUrl(api, input.model)), upstream: diagnosticValue(result), hint: '中转站不支持 OpenAI Images API，且 Gemini 原生接口也未返回 JSON，请核对该中转站的 Gemini 接口地址。'})
                     }
                 }
-                if (!response.ok) return send(res, response.status, {error: friendlyProviderError(result, response.status, isReferenceRequest), provider: responseProvider})
-                const normalizedData = responseProvider === 'gemini' ? geminiImages(result) : (result.data || [])
+                if (!response.ok) return send(res, response.status, {
+                    error: friendlyProviderError(result, response.status, isReferenceRequest),
+                    code: `UPSTREAM_HTTP_${response.status}`,
+                    status: response.status,
+                    provider: responseProvider,
+                    endpoint: safeEndpoint(responseProvider === 'gemini' ? geminiUrl(api, input.model) : apiUrl(api.endpoint, imagePath)),
+                    upstream: diagnosticValue(result),
+                    hint: isReferenceRequest ? '当前请求包含参考图，请确认模型支持人物替换/图生图，并检查参考图尺寸。' : `当前请求尺寸为 ${input.size || '默认尺寸'}；请确认模型支持该尺寸。`
+                })
+                const normalizedData = responseProvider === 'gemini'
+                    ? geminiImages(result)
+                    : route.protocol === 'anthropic-messages'
+                        ? messageImages(result)
+                        : (result.data || [])
+                if (input.debug) {
+                    let maskBytes = 0
+                    if (input.mask && isReferenceRequest && route.protocol === 'openai-images') {
+                        try { maskBytes = parseDataUrl(input.mask).buffer.length } catch { maskBytes = 0 }
+                    }
+                    debugResponses.push({
+                        iteration: index + 1,
+                        provider: responseProvider,
+                        protocol: route.protocol,
+                        imageConfig: responseProvider === 'gemini' ? geminiImageConfig(input) : null,
+                        editPath: imagePath,
+                        requestBody: body instanceof FormData ? 'multipart/form-data' : 'application/json',
+                        maskAttached: Boolean(maskBytes),
+                        maskBytes,
+                        httpStatus: response.status,
+                        responseKeys: result && typeof result === 'object' ? Object.keys(result) : [],
+                        normalizedImageCount: normalizedData.length,
+                        candidateParts: diagnosticCandidateParts(result),
+                        upstream: diagnosticValue(result)
+                    })
+                }
+                if (!normalizedData.length) {
+                    return send(res, 502, {
+                        error: '图片接口返回成功，但响应中没有可识别的图片数据',
+                        code: 'UPSTREAM_NO_IMAGE_DATA',
+                        provider: responseProvider,
+                        endpoint: safeEndpoint(responseProvider === 'gemini' ? geminiUrl(api, input.model) : apiUrl(api.endpoint, imagePath)),
+                        responseKeys: result && typeof result === 'object' ? Object.keys(result) : [],
+                        hint: '请检查中转站是否返回 inlineData/inline_data、data[].b64_json 或图片 URL。',
+                        upstream: diagnosticValue(result)
+                    })
+                }
                 responses.push({
                     usage: result.usage || null,
                     revisedPrompts: normalizedData.map((item) => item.revised_prompt).filter(Boolean)
@@ -1052,6 +1337,19 @@ http.createServer(async (req, res) => {
                     console.error('image cache failed:', error.message)
                 })
                 return {...image, url: source, sourceUrl: image.url || source}
+            })
+            const recordImages = await Promise.all(persistedImages.map(async (image) => ({
+                ...(await externalizeRecordImage(image)),
+                id: crypto.randomUUID(),
+                taskId: input.taskId || null,
+                parentResultId: input.parentResultId || null,
+                version: Math.max(1, Number(input.version || 1))
+            })))
+            const responseImages = persistedImages.map((image, index) => {
+                if (!image?.b64_json || !recordImages[index]?.url) return image
+                const value = {...image, url: recordImages[index].url, sourceUrl: recordImages[index].url}
+                delete value.b64_json
+                return value
             })
             const record = {
                 id: Date.now().toString(),
@@ -1074,16 +1372,29 @@ http.createServer(async (req, res) => {
                     }))
                 },
                 responses,
-                images: persistedImages.map((image) => ({...image, id: crypto.randomUUID(), taskId: input.taskId || null, parentResultId: input.parentResultId || null, version: Math.max(1, Number(input.version || 1))}))
+                images: recordImages
             }
             await appendGenerationRecord(record)
-            return send(res, 200, {created: Date.now(), data: persistedImages})
+            const payload = {created: Date.now(), data: responseImages}
+            if (input.debug) {
+                payload.debug = {
+                    note: '仅用于排查，字符串最长 2000 字符，深度和数组长度均有限制',
+                    requestedModel: input.model,
+                    provider: debugResponses[debugResponses.length - 1]?.provider || null,
+                    normalizedImageCount: images.length,
+                    responses: debugResponses
+                }
+            }
+            return send(res, 200, payload)
         }
         send(res, 404, {error: 'Not found'})
     } catch (error) {
-        if (error.name !== 'AbortError') send(res, 500, {error: error.message})
+        if (error.name !== 'AbortError') {
+            console.error(`[${req.method} ${req.url}] ${error.stack || error.message}`)
+            send(res, error.status || 500, {error: error.message, code: error.code || 'LOCAL_SERVER_ERROR'})
+        }
     }
-}).listen(4317, '127.0.0.1', () => console.log('PhantomTower local server: http://127.0.0.1:4317'))
+}).listen(serverPort, '127.0.0.1', () => console.log(`PhantomTower local server: http://127.0.0.1:${serverPort}`))
 
 
 

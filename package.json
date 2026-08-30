@@ -5,12 +5,12 @@
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
-    "dev": "vite",
+    "dev": "node scripts/dev.cjs",
     "server": "node server/index.js",
     "build": "vite build",
     "build:server": "vite build --config vite.server.config.js",
     "electron:dev": "npm run build && electron .",
-    "dist:win": "npm run build && npm run build:server && node scripts/patch-nsis-installer.cjs && electron-builder --win nsis",
+    "dist:win": "npm run build && npm run build:server && electron-builder --win nsis --publish never",
     "dist:mac": "npm run build && npm run build:server && electron-builder --mac dmg zip",
     "license:issue": "node cloudflare-api/scripts/license-manager-tencent.cjs issue",
     "license:revoke": "node cloudflare-api/scripts/license-manager-tencent.cjs revoke",
@@ -31,6 +31,7 @@
     "electronDownload": {
       "mirror": "https://npmmirror.com/mirrors/electron/"
     },
+    "electronDist": "C:\\electron-local\\electron-v43.3.0-win32-x64",
     "files": [
       "web-dist/**/*",
       "electron/**/*",
@@ -55,6 +56,13 @@
         "to": "server",
         "filter": [
           "index.js"
+        ]
+      },
+      {
+        "from": "vision-models",
+        "to": "vision-models",
+        "filter": [
+          "**/*"
         ]
       }
     ],
@@ -83,7 +91,9 @@
     "electron-updater": "^6.8.9",
     "element-plus": "^2.14.4",
     "lucide-vue-next": "latest",
+    "onnxruntime-node": "^1.29.0",
     "pinia": "latest",
+    "sharp": "^0.35.4",
     "vite": "latest",
     "vue": "latest",
     "vue-router": "latest"

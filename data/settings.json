@@ -5,45 +5,36 @@
       "endpoint": "https://image.cjyyswq.com",
       "model": "",
       "id": "741f4655-3561-4708-b4c6-56ad6a861af7",
-      "provider": "anthropic",
+      "provider": "openai",
       "secretId": "api-741f4655-3561-4708-b4c6-56ad6a861af7",
       "secretConfigured": true,
       "detectedRoute": {
-        "provider": "anthropic",
-        "protocol": "anthropic-messages",
-        "authType": "x-api-key",
-        "imagePath": "/messages",
-        "editPath": "/messages",
+        "provider": "openai",
+        "protocol": "openai-images",
+        "authType": "bearer",
+        "imagePath": "/images/generations",
+        "editPath": "/images/edits",
         "confidence": "verified",
-        "testedAt": "2026-08-28T14:54:07.302Z"
+        "testedAt": "2026-08-30T07:56:09.567Z"
       },
       "modelRoutes": {
-        "gpt-image-2-1k": {
-          "provider": "anthropic",
-          "protocol": "anthropic-messages",
-          "authType": "x-api-key",
-          "imagePath": "/messages",
-          "editPath": "/messages",
+        "gpt-image-2-high": {
+          "provider": "openai",
+          "protocol": "openai-images",
+          "authType": "bearer",
+          "imagePath": "/images/generations",
+          "editPath": "/images/edits",
           "confidence": "verified",
-          "testedAt": "2026-08-28T14:54:07.302Z"
+          "testedAt": "2026-08-30T07:56:09.567Z"
         },
-        "gpt-image-2": {
-          "provider": "anthropic",
-          "protocol": "anthropic-messages",
-          "authType": "x-api-key",
-          "imagePath": "/messages",
-          "editPath": "/messages",
+        "gpt-image-2-super": {
+          "provider": "openai",
+          "protocol": "openai-images",
+          "authType": "bearer",
+          "imagePath": "/images/generations",
+          "editPath": "/images/edits",
           "confidence": "verified",
-          "testedAt": "2026-08-28T14:54:07.302Z"
-        },
-        "gpt-image-2-full": {
-          "provider": "anthropic",
-          "protocol": "anthropic-messages",
-          "authType": "x-api-key",
-          "imagePath": "/messages",
-          "editPath": "/messages",
-          "confidence": "verified",
-          "testedAt": "2026-08-28T14:54:07.302Z"
+          "testedAt": "2026-08-30T07:56:09.567Z"
         }
       },
       "encryptedKey": "v1:y1Dvxa7L8EJP7sE4:4v+3KsfV1ZjAwU8g5OPgVA==:OqTPnHCQ73MR0ORvnB6j2ZDruHWW4NZcytYo3gnpzEj+ejjsTHlmg4HHRLmZAM+cFQFM"
@@ -54,27 +45,647 @@
       "id": "5695957d-c2c9-4561-87a4-56464f48f098",
       "secretId": "api-5695957d-c2c9-4561-87a4-56464f48f098",
       "secretConfigured": true,
-      "encryptedKey": "v1:82wjHQqtc5NGqQ0m:2GUhaeEtf4i0gI6ZpY/iEw==:NNTd1Vxv+IY9pnu3w6ygW5TmZzTG0TF59ET5GEhrt9xy81f1FuoH8YrBj7WvzxNgHHAikZG3AR3pDryMRTS3zVAsvw=="
+      "provider": "gemini",
+      "detectedRoute": {
+        "provider": "gemini",
+        "protocol": "gemini-generate-content",
+        "authType": "query-key",
+        "imagePath": "",
+        "editPath": "",
+        "confidence": "verified",
+        "testedAt": "2026-08-30T11:27:36.322Z"
+      },
+      "modelRoutes": {
+        "gpt-oss-120b-medium": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-30T11:27:36.322Z"
+        },
+        "gemini-3.1-flash-lite": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-30T11:27:36.322Z"
+        },
+        "gemini-3.5-flash-low": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-30T11:27:36.322Z"
+        },
+        "claude-opus-4-6-thinking": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-30T11:27:36.322Z"
+        },
+        "claude-sonnet-4-6": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-30T11:27:36.322Z"
+        },
+        "gemini-3.7-flash-high": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-30T11:27:36.322Z"
+        },
+        "gemini-3-flash": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-30T11:27:36.322Z"
+        },
+        "gemini-3-flash-agent": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-30T11:27:36.322Z"
+        },
+        "gemini-pro-agent": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-30T11:27:36.322Z"
+        },
+        "gemini-3.1-pro-low": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-30T11:27:36.322Z"
+        },
+        "gemini-3.5-flash-extra-low": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-30T11:27:36.322Z"
+        },
+        "gemini-3.6-flash-high": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-30T11:27:36.322Z"
+        },
+        "gemini-3.1-flash-image": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-30T11:27:36.322Z"
+        }
+      },
+      "encryptedKey": "v1:hHMTbiNWqDm/loRu:1sf7sjA7lF/UIHrV3YUvJw==:FWV2xz4qjTZu6dhAaNJQozjPCOuT+TeDEfDeprYQNuXDbiqEs1SFrl047h8IfEh9yeRPjFy048LmLT+sASc6FBexnA=="
     },
     {
-      "name": "11",
-      "endpoint": "https://www.cun.ai",
-      "id": "efcc6448-a030-4cdb-af0c-c76c63b196f0",
-      "secretId": "api-efcc6448-a030-4cdb-af0c-c76c63b196f0",
+      "name": "gemimi测试",
+      "endpoint": "https://image.cjyyswq.com/",
+      "provider": "gemini",
+      "id": "a1b5b379-1f0c-47fc-a7d2-e45432163326",
+      "secretId": "api-a1b5b379-1f0c-47fc-a7d2-e45432163326",
       "secretConfigured": true,
-      "encryptedKey": "v1:pBJar6FREfzekYpv:Q7QFX4HRI5U7t3WBqwV9uQ==:aY+T6bbxdDKZJvAEq4/auQ5Q9elrSrTFqBeo8tcey+Y/SkE0e2WNzeBH8QLNZrvPLqQU"
+      "detectedRoute": {
+        "provider": "gemini",
+        "protocol": "gemini-generate-content",
+        "authType": "query-key",
+        "imagePath": "",
+        "editPath": "",
+        "confidence": "verified",
+        "testedAt": "2026-08-29T04:12:36.110Z"
+      },
+      "modelRoutes": {
+        "sd2.5-1080p-official": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "grok-imagine-video": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "doubao-seedance-2-0-260128": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "video-v1-10s": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "sd2.0-720p-official": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "sd2.0-fast-480p": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "Minimax-H3-720p": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "grok-imagine-image-quality": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "nana-banana-pro_sync": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "veo-3-1-1080p": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "veo-omni-flash-1080p": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "veo-omni-flash-video-edit": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "doubao-seedance-2-5-260628": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "sd2.0-fast-720p": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "nana-banana-2_sync": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "sd2.0-720p-fast-official": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "veo-omni-flash": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "gpt-image-2-edit": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "sd2.0-1080p-official": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "video-ultra-720p-fast": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "grok-imagine-image": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "sd2.5-720p-standard": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "Minimax-H3-768p-933-10s": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "grok-imagine-video-1.5-preview": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "sd2.5-720p-official": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "video-ultra-720p": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "nana-banana-2": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "nana-banana-2-4k": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "video-fast-480p": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "video-v1-15s": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "Minimax-H3-768p-933-15s": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "nana-banana-pro-4k_sync": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "grok-4.5": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "gpt-image-2-1k": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "nana-banana-pro": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "gpt-image-2": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "sd2.0-1080p": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "sd2.0-480p": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "sd2.0-720p": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "video-v1-5s": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "nana-banana-2-4k_sync": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "video-fast-720p": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "veo-omni-flash-video-edit-1080p": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "veo-3-1": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "Minimax-H3-768p-933-10s-15s": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "nana-banana-pro-4k": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "video-ultra-720p-mini": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "video-pro-720p": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        },
+        "doubao-seedance-2-0-fast-260128": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-29T04:12:36.110Z"
+        }
+      },
+      "encryptedKey": "v1:1QKtKl+xmtQ+pHnG:cJ1FiBQpz0xeMZIMTbR0pg==:S7thGsMf13BdKscHA/5xYWZpVaEVq9iJHXR8jZ3H7cq02kzSpHZcaQ2gaR+bpDOBJIaw"
     },
     {
-      "name": "ohlao",
-      "endpoint": "https://cfapi.ohlao.cfd",
+      "name": "测试https://ohlao.cfd/",
+      "endpoint": "https://fast.ohlao.cfd",
+      "provider": "gemini",
+      "id": "cbc6f723-e25a-4732-9c78-25aa2d85320e",
+      "secretId": "api-cbc6f723-e25a-4732-9c78-25aa2d85320e",
+      "secretConfigured": true,
+      "detectedRoute": {
+        "provider": "gemini",
+        "protocol": "gemini-generate-content",
+        "authType": "query-key",
+        "imagePath": "",
+        "editPath": "",
+        "confidence": "verified",
+        "testedAt": "2026-08-30T11:16:21.232Z"
+      },
+      "modelRoutes": {
+        "gemini-3-pro-image": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-30T11:16:21.232Z"
+        },
+        "gemini-3.1-flash-image": {
+          "provider": "gemini",
+          "protocol": "gemini-generate-content",
+          "authType": "query-key",
+          "imagePath": "",
+          "editPath": "",
+          "confidence": "verified",
+          "testedAt": "2026-08-30T11:16:21.232Z"
+        }
+      },
+      "encryptedKey": "v1:o9fFfEWk8/he+sCf:FqWX6lS0D2H3Ok7cDZb/eQ==:B9/xWTDYyYtt+2FVt/WakVHlNhrnU/95bJeO9rvuz/ILCS16a6HOJ2JKrFWg4HUeaDpofJYa1k7tO6x/sm7Y6GZyww=="
+    },
+    {
+      "name": "ai夯爆了",
+      "endpoint": "https://api.hangzhale.com",
       "provider": "",
-      "id": "ff437634-9f28-442c-9257-82b5596ad45e",
-      "secretId": "api-ff437634-9f28-442c-9257-82b5596ad45e",
+      "id": "8a4c7a62-1531-4561-9509-e158bb9b33ff",
+      "secretId": "api-8a4c7a62-1531-4561-9509-e158bb9b33ff",
       "secretConfigured": true,
-      "encryptedKey": "v1:whdEls2/Jr3YoeCI:ZdXxrfSS9fy5zch2QK2M/w==:pWdZhrsmj/udeq1rQOYFv+BsS19S2WTMsnCuEu8pcchPOsf0I19XZoxn9JAWyEKsjtEm4efGOiwwLsC/lKYwTN+U8A=="
+      "encryptedKey": "v1:9xB4bBtaOKBh2kay:OTM62Di1vNhijIqaCaIO1A==:cljc6E1vrhzkYIuUG/m0ea5JgfRiEaDomaz1J71CyXn+7DlMy4ktL7HLB43v7Xjx0ZJR1RIHiHbXvd+PR7w8brfFNA=="
     }
   ],
-  "activeApiId": "741f4655-3561-4708-b4c6-56ad6a861af7",
+  "activeApiId": "5695957d-c2c9-4561-87a4-56464f48f098",
   "schemaVersion": 2,
   "preferences": {},
   "storage": {

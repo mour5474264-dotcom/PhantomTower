@@ -7,10 +7,13 @@ import {
   getSettings,
   getModels,
   getPromptTemplates,
+  getRecords,
   generateImage,
+  generatePersonMask,
   cancelGeneration,
   exportImages,
-  prepareEditImage
+  prepareEditImage,
+  formatApiError
 } from '../api'
 
 const URL = {
@@ -19,17 +22,18 @@ const URL = {
   }
 }
 const models = ref([]);
+const activeApiConfig = ref(null)
 const presets = ref([]);
 const configLoading = ref(false)
 const modelLoadError = ref('')
 const templateLoadError = ref('')
 const activeWorkspaceName = ref('')
 const model = ref('');
-const modelMode = ref('balanced');
 const presetId = ref('');
 const prompt = ref('');
 const count = ref(1);
 const resolution = ref('2K');
+const aspectRatio = ref('1:1');
 const format = ref('png');
 const size = ref('1024x1024');
 const customWidth = ref(null);
@@ -59,6 +63,7 @@ const HOME_MEMORY_DB = 'sample-factory-home-memory'
 const HOME_MEMORY_STORE = 'workspace'
 const HOME_MEMORY_KEY = 'home'
 const HOME_MEMORY_VERSION = 1
+const MAX_REFERENCE_IMAGE_SIDE = 4096
 let restoringHomeMemory = true
 let persistHomeMemoryTimer = 0
 let configRequestId = 0
@@ -71,8 +76,47 @@ function showMessage(type, message) {
     message,
     duration: type === 'error' ? 5000 : 3500,
     showClose: true,
-    grouping: true
+    grouping: false
   })
+}
+
+function logGenerationResponse(kind, requestSnapshot, response) {
+  if (!response || typeof console === 'undefined') return
+  const debug = response.debug || null
+  console.groupCollapsed(`[样片工厂] ${kind} 接口返回 · ${requestSnapshot?.model || '未指定模型'}`)
+  console.log('请求摘要', {
+    model: requestSnapshot?.model || '',
+    mode: requestSnapshot?.mode || '',
+    operation: requestSnapshot?.operation || '',
+    imageCount: Array.isArray(requestSnapshot?.images) ? requestSnapshot.images.length : 0,
+    size: requestSnapshot?.size || '',
+    resolution: requestSnapshot?.resolution || '',
+    aspectRatio: requestSnapshot?.aspectRatio || ''
+  })
+  console.log('服务端响应', response)
+  console.log('服务端诊断', debug || '服务端未返回 debug 字段')
+  const candidateParts = debug?.responses?.flatMap((item) => item.candidateParts || []) || []
+  console.log('Gemini candidateParts', candidateParts)
+  if (candidateParts.length) console.table(candidateParts)
+  console.log('data 首项', Array.isArray(response.data) ? response.data[0] || null : null)
+  console.groupEnd()
+}
+
+function imageUrlFromOutput(output) {
+  if (!output) return ''
+  if (typeof output === 'string') return output
+  const direct = output.url || output.image_url?.url || (typeof output.image_url === 'string' ? output.image_url : '')
+  if (direct) return direct
+  const encoded = output.b64_json || output.base64 || output.base64Data || output.inlineData?.data || output.inline_data?.data
+  if (!encoded) return ''
+  if (/^data:image\//i.test(encoded)) return encoded
+  const mimeType = output.mime_type || output.mimeType || output.inlineData?.mimeType || output.inline_data?.mime_type || 'image/png'
+  return `data:${mimeType};base64,${encoded}`
+}
+
+function imageLoadsImmediately(url) {
+  return /^data:image\//i.test(String(url || ''))
+    || /^https?:\/\/127\.0\.0\.1(?::\d+)?\/api\/generated\//i.test(String(url || ''))
 }
 
 watch(error, (message) => {
@@ -145,6 +189,9 @@ function fileToDataUrl(file) {
 }
 
 async function getRequestSize(task, requestConfig) {
+  // Gemini does not use the OpenAI `size` field. Its native size controls are
+  // sent as generationConfig.imageConfig.imageSize/aspectRatio below.
+  if (requestConfig.protocol === 'gemini') return ''
   if (requestConfig.size === 'custom') {
     const width = Number(requestConfig.customWidth)
     const height = Number(requestConfig.customHeight)
@@ -193,6 +240,7 @@ const taskCount = computed(() => isTextMode.value ? (prompt.value.trim() || pres
 const totalExpected = computed(() => taskCount.value * Math.max(1, Number(count.value || 1)))
 const imagesPerRequest = computed(() => Object.values(materials.value).reduce((total, items) => total + items.length, 0))
 const sizeSummary = computed(() => {
+  if (selectedProtocol.value === 'gemini') return `${resolution.value} · ${aspectRatio.value}`
   if (size.value === 'custom') return `${customWidth.value} x ${customHeight.value}`
   return size.value
 })
@@ -245,12 +293,38 @@ const activeMaterialTypes = computed(() => {
   return materialTypes.filter((item) => keys.includes(item.key))
 })
 
-const sizeOptions = [
+const gptSizeOptions = [
   {label: '1K（1080x1920）', value: '1080x1920'},
   {label: '2K（2160x3240）', value: '2160x3240'},
-  {label: '4K（2160x3840）', value: '2160x3840'},
+  {label: '4K（2160x3840，9:16）', value: '2160x3840'},
   {label: '自定义尺寸', value: 'custom'}
 ]
+const geminiResolutionOptions = [
+  {label: '1K', value: '1K'},
+  {label: '2K', value: '2K'},
+  {label: '4K', value: '4K'}
+]
+const geminiAspectRatioOptions = [
+  {label: '1:1', value: '1:1'},
+  {label: '16:9', value: '16:9'},
+  {label: '9:16', value: '9:16'},
+  {label: '4:3', value: '4:3'},
+  {label: '3:4', value: '3:4'},
+  {label: '3:2', value: '3:2'},
+  {label: '2:3', value: '2:3'},
+  {label: '5:4', value: '5:4'},
+  {label: '4:5', value: '4:5'},
+  {label: '21:9', value: '21:9'}
+]
+const selectedProtocol = computed(() => {
+  const api = activeApiConfig.value
+  const route = api?.modelRoutes?.[model.value] || api?.detectedRoute || {}
+  return String(route.provider || api?.provider || '').toLowerCase() === 'gemini'
+      || String(route.protocol || '').toLowerCase() === 'gemini-generate-content'
+    ? 'gemini'
+    : 'openai'
+})
+const sizeOptions = computed(() => gptSizeOptions)
 const selectedModel = computed(() => models.value.find((item) => item.id === model.value) || null)
 function modelSupportsSize(value) {
   if (value === 'custom') return true
@@ -261,8 +335,15 @@ function sizeDisabled(value) {
   return !modelSupportsSize(value)
 }
 
-watch(model, () => {
-  if (!modelSupportsSize(size.value)) size.value = '1024x1024'
+watch([model, selectedProtocol], () => {
+  if (selectedProtocol.value === 'gemini') {
+    if (!geminiResolutionOptions.some((option) => option.value === resolution.value)) resolution.value = '2K'
+    if (!geminiAspectRatioOptions.some((option) => option.value === aspectRatio.value)) aspectRatio.value = geminiAspectRatioOptions[0].value
+    return
+  }
+  if (!sizeOptions.value.some((option) => option.value === size.value) || !modelSupportsSize(size.value)) {
+    size.value = sizeOptions.value[0]?.value || '1024x1024'
+  }
 })
 
 function rawFile(value) {
@@ -293,13 +374,15 @@ function restoreMaterialItem(item) {
 }
 
 function resultMemoryItem(item) {
+  const isSourcePreview = Boolean(item.isSourcePreview)
   return {
     id: item.id,
     loading: false,
-    status: item.loading ? 'stopped' : item.status,
+    status: isSourcePreview ? 'stopped' : (item.url ? 'completed' : (item.loading ? 'stopped' : item.status)),
     error: item.error || '',
-    url: item.url || '',
+    url: isSourcePreview ? '' : (item.url || ''),
     label: item.label || '样片',
+    isSourcePreview,
     taskId: item.taskId || null,
     parentResultId: item.parentResultId || null,
     version: item.version || 1,
@@ -308,12 +391,77 @@ function resultMemoryItem(item) {
 }
 
 function restoreResultItem(item) {
+  // A persisted result with an image is still a usable result. Older
+  // snapshots may have marked an in-flight card as stopped during refresh;
+  // that status must not hide the image that was already produced.
+  const hasImage = Boolean(item?.url)
   return {
     ...item,
     loading: false,
-    imageLoading: Boolean(item?.url),
+    status: hasImage ? 'completed' : item.status,
+    imageLoading: Boolean(item?.url) && !imageLoadsImmediately(item.url),
     task: item?.requestSnapshot ? {label: item.label || '样片', type: item.requestSnapshot.operation || item.requestSnapshot.mode || 'text'} : null
   }
+}
+
+async function restorePersistedResultImages() {
+  const pending = results.value.filter((item) => !item?.url && (item?.taskId || item?.requestSnapshot?.taskId))
+  if (!pending.length) return
+  try {
+    const records = await getRecords()
+    const imagesByTaskId = new Map()
+    for (const record of Array.isArray(records) ? records : []) {
+      const recordTaskId = record?.request?.taskId
+      for (const image of Array.isArray(record?.images) ? record.images : []) {
+        const taskId = image?.taskId || recordTaskId
+        const url = imageUrlFromOutput(image)
+        if (taskId && url && !imagesByTaskId.has(taskId)) imagesByTaskId.set(taskId, {image, url})
+      }
+    }
+    if (!imagesByTaskId.size) return
+    results.value = results.value.map((item) => {
+      if (item?.url) return item
+      const taskId = item?.taskId || item?.requestSnapshot?.taskId
+      const persisted = taskId ? imagesByTaskId.get(taskId) : null
+      if (!persisted) return item
+      return {
+        ...item,
+        loading: false,
+        status: 'completed',
+        error: '',
+        imageLoading: Boolean(persisted.url) && !imageLoadsImmediately(persisted.url),
+        url: persisted.url,
+        id: persisted.image?.id || item.id,
+        taskId: persisted.image?.taskId || taskId,
+        parentResultId: persisted.image?.parentResultId || item.parentResultId || null,
+        version: persisted.image?.version || item.version || 1
+      }
+    })
+  } catch (exception) {
+    // The local record service is optional for restoring the in-memory UI.
+    console.warn('persisted result restore failed', exception)
+  }
+}
+
+function restoreStaleResultPreviews() {
+  const references = materials.value.reference || []
+  if (!references.length) return
+  results.value = results.value.map((item) => {
+    if (item?.status !== 'stopped' || item.url || item.taskId || item.requestSnapshot) return item
+    const numbered = String(item.label || '').match(/(?:逐张处理|三视图)\s+(\d+)/)
+    const source = numbered ? references[Number(numbered[1]) - 1] : references[0]
+    const url = source?.previewUrl || ''
+    if (!url) return item
+    return {
+      ...item,
+      status: 'completed',
+      loading: false,
+      imageLoading: false,
+      url,
+      label: item.isSourcePreview ? item.label : `上次上传 · ${item.label || '目标图'}`,
+      isSourcePreview: true
+    }
+  })
 }
 
 function makeHomeMemorySnapshot() {
@@ -322,11 +470,11 @@ function makeHomeMemorySnapshot() {
     savedAt: new Date().toISOString(),
     form: {
       model: model.value,
-      modelMode: modelMode.value,
       presetId: presetId.value,
       prompt: prompt.value,
       count: count.value,
       resolution: resolution.value,
+      aspectRatio: aspectRatio.value,
       format: format.value,
       size: size.value,
       customWidth: customWidth.value,
@@ -349,11 +497,13 @@ async function restoreHomeMemory() {
     if (!saved || saved.version !== HOME_MEMORY_VERSION) return
     const form = saved.form || {}
     model.value = form.model || model.value
-    modelMode.value = form.modelMode || modelMode.value
     presetId.value = form.presetId || ''
     prompt.value = form.prompt || ''
     count.value = Number(form.count || 1)
     resolution.value = form.resolution || resolution.value
+    aspectRatio.value = geminiAspectRatioOptions.some((option) => option.value === form.aspectRatio)
+      ? form.aspectRatio
+      : geminiAspectRatioOptions[0].value
     format.value = form.format || format.value
     size.value = form.size || size.value
     customWidth.value = form.customWidth ? Number(form.customWidth) : null
@@ -367,6 +517,8 @@ async function restoreHomeMemory() {
     })
     results.value = (saved.results || []).map(restoreResultItem)
     selected.value = new Set()
+    await restorePersistedResultImages()
+    restoreStaleResultPreviews()
   } catch (exception) {
     console.warn('home memory restore failed', exception)
   }
@@ -420,16 +572,130 @@ async function buildLabeledReferences(task, materialSet = materials.value) {
   return labeled
 }
 
-function addFiles(key, upload) {
+async function imageDimensions(file) {
+  if (typeof createImageBitmap === 'function') {
+    const bitmap = await createImageBitmap(file, {imageOrientation: 'from-image'})
+    const dimensions = {width: bitmap.width, height: bitmap.height}
+    bitmap.close?.()
+    return dimensions
+  }
+  const previewUrl = globalThis.URL.createObjectURL(file)
+  try {
+    const dimensions = await new Promise((resolve, reject) => {
+      const image = new Image()
+      image.onload = () => resolve({width: image.naturalWidth, height: image.naturalHeight})
+      image.onerror = () => reject(new Error('无法读取图片尺寸'))
+      image.src = previewUrl
+    })
+    return dimensions
+  } finally {
+    globalThis.URL.revokeObjectURL(previewUrl)
+  }
+}
+
+function canvasToBlob(canvas, type, quality) {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (blob) {
+        resolve(blob)
+      } else {
+        reject(new Error('图片压缩失败'))
+      }
+    }, type, quality)
+  })
+}
+
+async function resizeImageFile(file, width, height) {
+  const canvas = document.createElement('canvas')
+  canvas.width = width
+  canvas.height = height
+  const context = canvas.getContext('2d')
+  if (!context) throw new Error('当前环境不支持图片压缩')
+
+  let source
+  let previewUrl = ''
+  try {
+    if (typeof createImageBitmap === 'function') {
+      // Chromium's high-quality bitmap resizer handles EXIF orientation and
+      // avoids the extra aliasing produced by a single canvas draw operation.
+      source = await createImageBitmap(file, {
+        imageOrientation: 'from-image',
+        resizeWidth: width,
+        resizeHeight: height,
+        resizeQuality: 'high'
+      })
+      context.imageSmoothingEnabled = true
+      context.imageSmoothingQuality = 'high'
+      context.drawImage(source, 0, 0, width, height)
+    } else {
+      previewUrl = globalThis.URL.createObjectURL(file)
+      source = await new Promise((resolve, reject) => {
+        const image = new Image()
+        image.onload = () => resolve(image)
+        image.onerror = () => reject(new Error('无法读取图片内容'))
+        image.src = previewUrl
+      })
+
+      // Downsample in multiple roughly 2x steps to reduce aliasing on
+      // browsers without createImageBitmap's resizeQuality option.
+      let currentSource = source
+      let currentWidth = source.naturalWidth
+      let currentHeight = source.naturalHeight
+      while (currentWidth > width * 2 || currentHeight > height * 2) {
+        const nextWidth = Math.max(width, Math.round(currentWidth / 2))
+        const nextHeight = Math.max(height, Math.round(currentHeight / 2))
+        const stepCanvas = document.createElement('canvas')
+        stepCanvas.width = nextWidth
+        stepCanvas.height = nextHeight
+        const stepContext = stepCanvas.getContext('2d')
+        if (!stepContext) throw new Error('当前环境不支持图片压缩')
+        stepContext.imageSmoothingEnabled = true
+        stepContext.imageSmoothingQuality = 'high'
+        stepContext.drawImage(currentSource, 0, 0, nextWidth, nextHeight)
+        currentSource = stepCanvas
+        currentWidth = nextWidth
+        currentHeight = nextHeight
+      }
+      source = currentSource
+    }
+    if (typeof createImageBitmap !== 'function') {
+      context.imageSmoothingEnabled = true
+      context.imageSmoothingQuality = 'high'
+      context.drawImage(source, 0, 0, width, height)
+    }
+    const type = /^image\/(jpeg|jpg)$/i.test(file.type) ? 'image/jpeg' : /^image\/webp$/i.test(file.type) ? 'image/webp' : 'image/png'
+    const blob = await canvasToBlob(canvas, type, type === 'image/png' ? undefined : 0.95)
+    return new File([blob], file.name, {type: blob.type, lastModified: file.lastModified})
+  } finally {
+    source?.close?.()
+    if (previewUrl) globalThis.URL.revokeObjectURL(previewUrl)
+  }
+}
+
+async function addFiles(key, upload) {
   const file = rawFile(upload);
   if (!file || !file.type?.startsWith('image/')) return;
+  let preparedFile = file
+  try {
+    const {width, height} = await imageDimensions(file)
+    if (Math.max(width, height) > MAX_REFERENCE_IMAGE_SIDE) {
+      const scale = MAX_REFERENCE_IMAGE_SIDE / Math.max(width, height)
+      const resizedWidth = Math.max(1, Math.round(width * scale))
+      const resizedHeight = Math.max(1, Math.round(height * scale))
+      preparedFile = await resizeImageFile(file, resizedWidth, resizedHeight)
+      showMessage('warning', `图片“${file.name}”尺寸为 ${width} × ${height}，已自动压缩为 ${resizedWidth} × ${resizedHeight}（最长边 4096 像素）`)
+    }
+  } catch (exception) {
+    error.value = exception?.message || '图片压缩失败，请重新上传图片';
+    return;
+  }
   const limit = key === 'person' ? 3 : ['pose', 'batchReference', 'editReference'].includes(key) ? 1 : 30;
   if (materials.value[key].length >= limit) {
     error.value = `${materialLabels[key]}最多添加 ${limit} 张`;
     return;
   }
-  if (materials.value[key].some((item) => item.name === file.name && item.size === file.size)) return;
-  materials.value[key].push(markRaw({file, name: file.name, size: file.size, previewUrl: URL.createObjectURL(file)}))
+  if (materials.value[key].some((item) => item.name === preparedFile.name && item.size === preparedFile.size)) return;
+  materials.value[key].push(markRaw({file: preparedFile, name: preparedFile.name, size: preparedFile.size, previewUrl: URL.createObjectURL(preparedFile)}))
 }
 
 function removeFile(key, index) {
@@ -451,6 +717,7 @@ async function refresh(options = {}) {
     const settings = await getSettings().catch(() => null)
     if (requestId !== configRequestId) return
     const activeApi = settings?.apis?.find((item) => item.id === settings.activeApiId)
+    activeApiConfig.value = activeApi || null
     activeWorkspaceName.value = activeApi?.name || ''
     const modelsRequest = getModels()
     const templatesVersion = ++templateRequestId
@@ -500,6 +767,7 @@ async function startNewTask() {
   editParent.value = null;
   presetId.value = '';
   count.value = 1;
+  aspectRatio.value = geminiAspectRatioOptions[0].value;
   size.value = '1024x1024';
   customWidth.value = null;
   customHeight.value = null;
@@ -596,7 +864,7 @@ function buildImageTasks() {
 function imageValidationError() {
   if (!materials.value.reference.length) return `${operationLabel()}需要至少一张上传图片`
   if (imageOperation.value === 'background' && !materials.value.scene.length) return '背景替换需要一张背景参考图'
-  if (imageOperation.value === 'edit' && !prompt.value.trim()) return '请说明需要修改的局部内容'
+  if (imageOperation.value === 'edit' && !prompt.value.trim() && !preset.value) return '请选择局部编辑预设或填写补充内容'
   if (imageOperation.value === 'prop') {
     if (!materials.value.prop.length) return '道具替换需要一张道具参考图'
     if (!replaceObject.value.trim()) return '请说明主目标图中需要替换的道具'
@@ -636,7 +904,10 @@ function buildMaterialPrompt(labeled, taskType = 'text', taskLabel = '提示词�
   const editReferenceRule = taskType === 'local-edit' && labeled.some((item) => item.role === 'edit_reference')
       ? '编辑参考图不是第二张待编辑画布，也不得整张覆盖或合成到主参考图。它只提供用户在补充提示词中明确指定的内容或视觉特征，例如某个道具、花材、材质、色调、光线或氛围。只借用与明确要求有关的特征；未明确要求时不得使用它。若用户明确要求色调或光线调整，可在完成该要求所需范围内调整全图，同时保持主体、构图、空间关系和未指定内容不变。'
       : '';
-  const rule = [configuredRule, defaultRule, batchMaterialRule, editReferenceRule].filter(Boolean).join('\n\n');
+  const fullPersonReplacementRule = taskType === 'reference' && labeled.some((item) => item.role === 'person_reference')
+      ? '【完整人物替换硬约束】人物参考图不是只用于换脸。必须从头发、脸、颈部、肩膀、躯干、手臂、腿部到服装边界，生成同一个完整人物，保证脸部身份与身体体型、肤色、发型和服装自然属于同一人。目标图只负责画幅、镜头、人物位置、大小、姿势、落脚点、遮挡和环境；不得保留目标图原人物的脸或身体后仅叠加一张新脸，不得出现脸和身体不匹配、脖子接缝、肤色断层或头身比例错误。'
+      : '';
+  const rule = [configuredRule, defaultRule, batchMaterialRule, editReferenceRule, fullPersonReplacementRule].filter(Boolean).join('\n\n');
   return `【本次只处理一个任务：${taskLabel}】\n${manifest}\n\n【执行规则】\n${rule}`;
 }
 
@@ -682,16 +953,18 @@ function createGenerationWork() {
   const tasks = buildTasks()
   const requestConfig = {
     model: model.value,
+    protocol: selectedProtocol.value,
     prompt: prompt.value,
     presetId: presetId.value || null,
     mode: isTextMode.value ? 'text' : 'image',
-    quality: modelMode.value === 'quality' ? 'high' : 'medium',
+    quality: 'high',
     size: size.value,
     customWidth: size.value === 'custom' ? normalizedWidth : null,
     customHeight: size.value === 'custom' ? normalizedHeight : null,
     replaceObject: replaceObject.value,
     format: format.value,
-    resolution: resolutionForSize(size.value)
+    resolution: selectedProtocol.value === 'gemini' ? resolution.value : resolutionForSize(size.value),
+    aspectRatio: selectedProtocol.value === 'gemini' ? aspectRatio.value : ''
   }
   const materialSnapshot = Object.fromEntries(
     Object.entries(materials.value).map(([key, items]) => [key, [...items]])
@@ -722,15 +995,45 @@ async function runGeneration(work) {
   running.value = true
   try {
     const selectedTemplate = availableTemplates.value.find((item) => item.id === work.requestConfig.presetId)
-    const preparedTasks = await Promise.all(work.tasks.map(async (task) => ({
-      task,
-      labeled: await buildLabeledReferences(task, work.materialSnapshot),
-      requestSize: await getRequestSize(task, work.requestConfig)
-    })))
+    // Only native Gemini requests skip the local mask call. An OpenAI-compatible
+    // relay may expose a Gemini-named model while still supporting image masks.
+    const isGeminiRequest = work.requestConfig.protocol === 'gemini'
+    const preparedTasks = await Promise.all(work.tasks.map(async (task) => {
+      const labeled = await buildLabeledReferences(task, work.materialSnapshot)
+      let mask = ''
+      let maskStatus = 'not-requested'
+      // Generate one mask per target task, then reuse it for all copies. This
+      // avoids running local vision repeatedly when the user requests N copies.
+      if (task.type === 'reference' && !isGeminiRequest) {
+        const target = labeled.find((item) => item.role === 'target_reference')
+        if (target?.data) {
+          try {
+            const maskResult = await generatePersonMask(target.data, {operation: task.type})
+            mask = maskResult.mask || ''
+            maskStatus = mask ? 'generated' : 'empty'
+          } catch (maskError) {
+            maskStatus = maskError?.details?.code || maskError?.code || 'unavailable'
+            console.warn('automatic person mask unavailable; continuing without mask', maskError)
+          }
+        }
+      }
+      return {
+        task,
+        labeled,
+        mask,
+        maskStatus: task.type === 'reference' && isGeminiRequest ? 'skipped-gemini' : maskStatus,
+        requestSize: await getRequestSize(task, work.requestConfig)
+      }
+    }))
     if (workController.signal.aborted) throw new DOMException('Aborted', 'AbortError')
     const preparedByTask = new Map(preparedTasks.map((item) => [item.task, item]))
 
-    const jobs = work.jobs.map(async ({task}, jobIndex) => {
+    // Keep a small number of provider requests in flight. Launching every
+    // target at once exceeds browser/relay connection limits; queued requests
+    // then appear in DevTools without a payload and leave cards pending.
+    const concurrency = work.requestConfig.protocol === 'gemini' ? 3 : 4
+    let nextJobIndex = 0
+    const runJob = async ({task}, jobIndex) => {
       const prepared = preparedByTask.get(task)
       const {labeled} = prepared
       const resultIndex = work.resultStart + jobIndex
@@ -743,6 +1046,7 @@ async function runGeneration(work) {
       workController.signal.addEventListener('abort', abortHandler, {once: true})
       const requestSnapshot = {
           model: work.requestConfig.model,
+          protocol: work.requestConfig.protocol,
           prompt: buildMaterialPrompt(labeled, task.type, task.label, work.requestConfig.replaceObject, selectedTemplate?.systemPrompt || ''),
           extraPrompt: work.requestConfig.prompt,
           presetId: work.requestConfig.presetId,
@@ -750,15 +1054,18 @@ async function runGeneration(work) {
           images: labeled.map((item) => item.data),
           materials: labeled,
           n: 1,
-          size: prepared.requestSize,
+          ...(prepared.requestSize ? {size: prepared.requestSize} : {}),
           quality: work.requestConfig.quality,
           format: work.requestConfig.format,
           resolution: work.requestConfig.resolution,
-          mask: '',
+          aspectRatio: work.requestConfig.aspectRatio,
+          mask: prepared.mask,
+          maskStatus: prepared.maskStatus,
           taskId,
           parentResultId: task.type === 'local-edit' ? editParent.value?.id || null : null,
           version: task.type === 'local-edit' ? Number(editParent.value?.version || 0) + 1 : 1,
-          operation: task.type
+          operation: task.type,
+          debug: true
       }
       const startedIndex = currentResultIndex()
       if (startedIndex >= 0) results.value[startedIndex] = {
@@ -769,13 +1076,15 @@ async function runGeneration(work) {
       }
       try {
         const response = await generateImage(requestSnapshot, {signal: controller.signal});
+        logGenerationResponse('generate', requestSnapshot, response)
         const output = response.data?.[0];
+        const imageUrl = imageUrlFromOutput(output)
         const finishedIndex = currentResultIndex()
         if (finishedIndex >= 0) results.value[finishedIndex] = {
           id: results.value[finishedIndex]?.id || `result-${Date.now()}-${resultIndex}`,
           loading: false,
-          imageLoading: Boolean(output?.url),
-          url: output?.url || (output?.b64_json ? `data:image/png;base64,${output.b64_json}` : ''),
+          imageLoading: Boolean(imageUrl) && !imageLoadsImmediately(imageUrl),
+          url: imageUrl,
           label: task.label,
           task,
           id: output?.id || results.value[finishedIndex]?.id,
@@ -786,21 +1095,29 @@ async function runGeneration(work) {
         };
       } catch (e) {
         if (e.name !== 'AbortError' && !controller.signal.aborted && !workController.signal.aborted) {
-          error.value = e.message || '生成失败'
+          error.value = formatApiError(e, '生成失败')
           const failedIndex = currentResultIndex()
-          if (failedIndex >= 0) results.value[failedIndex] = {...results.value[failedIndex], loading: false, status: e.details?.generationAcceptedUnknown ? 'uncertain' : 'failed', uncertain: Boolean(e.details?.generationAcceptedUnknown), error: e.message || '生成失败'}
+          if (failedIndex >= 0) results.value[failedIndex] = {...results.value[failedIndex], loading: false, status: e.details?.generationAcceptedUnknown ? 'uncertain' : 'failed', uncertain: Boolean(e.details?.generationAcceptedUnknown), error: formatApiError(e, '生成失败')}
         }
       } finally {
         completedCount.value += 1
         generationControllers.delete(taskId)
         workController.signal.removeEventListener('abort', abortHandler)
       }
-    })
-    await Promise.all(jobs)
+    }
+    const worker = async () => {
+      while (!workController.signal.aborted) {
+        const jobIndex = nextJobIndex++
+        if (jobIndex >= work.jobs.length) return
+        queuedCount.value = Math.max(0, work.jobs.length - nextJobIndex)
+        await runJob(work.jobs[jobIndex], jobIndex)
+      }
+    }
+    await Promise.all(Array.from({length: Math.min(concurrency, work.jobs.length)}, () => worker()))
   } catch (e) {
-    if (e.name !== 'AbortError') error.value = e.message;
+    if (e.name !== 'AbortError') error.value = formatApiError(e);
     results.value.slice(work.resultStart, work.resultStart + work.jobs.length).forEach((item, offset) => {
-      if (item?.loading) results.value[work.resultStart + offset] = {...item, loading: false, status: e.details?.generationAcceptedUnknown ? 'uncertain' : 'failed', uncertain: Boolean(e.details?.generationAcceptedUnknown), error: e.message || '生成失败'}
+      if (item?.loading) results.value[work.resultStart + offset] = {...item, loading: false, status: e.details?.generationAcceptedUnknown ? 'uncertain' : 'failed', uncertain: Boolean(e.details?.generationAcceptedUnknown), error: formatApiError(e, '生成失败')}
     })
   } finally {
     work.controller = null
@@ -915,7 +1232,7 @@ async function continueEdit() {
     selected.value = new Set()
     showMessage('success', '已将选中样片设为编辑基础图')
   } catch (e) {
-    error.value = e.message || '无法读取已选样片'
+    error.value = formatApiError(e, '无法读取已选样片')
   } finally {
     preparingEdit.value = false
   }
@@ -946,7 +1263,7 @@ async function restoreHistoryEdit() {
     editParent.value = source;
     size.value = '1024x1024'
   } catch (exception) {
-    error.value = exception.message || '无法读取历史样片'
+    error.value = formatApiError(exception, '无法读取历史样片')
   }
 }
 
@@ -961,26 +1278,33 @@ async function retry(index) {
   const taskId = crypto.randomUUID()
   const controller = new AbortController()
   const requestSnapshot = {...item.requestSnapshot, taskId}
+  requestSnapshot.debug = true
   generationControllers.set(taskId, controller)
   results.value[index] = {
     ...item,
     loading: true,
     status: 'generating',
     error: '',
+    // Do not keep rendering the previous image while a retry is in flight;
+    // otherwise an upstream failure can look like a successful old result.
+    url: '',
+    imageLoading: false,
     task: item.task || {type: requestSnapshot.operation || requestSnapshot.mode || 'text', label: item.label || '样片'},
     taskId,
     requestSnapshot
   }
   try {
     const response = await generateImage(requestSnapshot, {signal: controller.signal})
+    logGenerationResponse('retry', requestSnapshot, response)
     const output = response.data?.[0];
+    const imageUrl = imageUrlFromOutput(output)
     results.value[index] = {
       ...item,
       loading: false,
-      status: output?.url || output?.b64_json ? 'completed' : 'failed',
-      error: output?.url || output?.b64_json ? '' : '接口没有返回可预览的图片',
-      imageLoading: Boolean(output?.url),
-      url: output?.url || (output?.b64_json ? `data:image/png;base64,${output.b64_json}` : ''),
+      status: imageUrl ? 'completed' : 'failed',
+      error: imageUrl ? '' : '接口没有返回可预览的图片',
+      imageLoading: Boolean(imageUrl) && !imageLoadsImmediately(imageUrl),
+      url: imageUrl,
       id: output?.id || item.id,
       taskId: output?.taskId || taskId,
       parentResultId: output?.parentResultId || null,
@@ -992,8 +1316,8 @@ async function retry(index) {
     if (e.name === 'AbortError') {
       results.value[index] = {...results.value[index], loading: false, status: 'stopped', error: ''}
     } else {
-      results.value[index] = {...results.value[index], loading: false, status: e.details?.generationAcceptedUnknown ? 'uncertain' : 'failed', uncertain: Boolean(e.details?.generationAcceptedUnknown), error: e.message || '生成失败'}
-      error.value = e.message || '生成失败'
+      results.value[index] = {...results.value[index], loading: false, status: e.details?.generationAcceptedUnknown ? 'uncertain' : 'failed', uncertain: Boolean(e.details?.generationAcceptedUnknown), error: formatApiError(e, '生成失败')}
+      error.value = formatApiError(e, '生成失败')
     }
   } finally {
     generationControllers.delete(taskId)
@@ -1009,7 +1333,7 @@ async function exportSelected() {
     const exported = await exportImages(urls, format.value)
     showMessage('success', `已导出 ${exported.count} 张图片到 ${exported.exportDir || '本地导出目录'}`)
   } catch (e) {
-    error.value = e.message || '导出图片失败'
+    error.value = formatApiError(e, '导出图片失败')
   } finally {
     exporting.value = false
   }
@@ -1102,11 +1426,11 @@ onMounted(() => window.addEventListener('sample-factory-prompt-templates-changed
 onActivated(() => void refreshPromptTemplates())
 watch([
   model,
-  modelMode,
   presetId,
   prompt,
   count,
   resolution,
+  aspectRatio,
   format,
   size,
   customWidth,
@@ -1226,6 +1550,19 @@ onBeforeUnmount(() => {
                   </el-option>
                 </el-select>
               </el-form-item>
+              <template v-if="selectedProtocol === 'gemini'">
+              <el-form-item class="quick-control quick-size" label="分辨率">
+                <el-select v-model="resolution" class="studio-select" popper-class="studio-select-popper">
+                  <el-option v-for="option in geminiResolutionOptions" :key="option.value" :label="option.label" :value="option.value"/>
+                </el-select>
+              </el-form-item>
+              <el-form-item class="quick-control quick-size" label="宽高比">
+                <el-select v-model="aspectRatio" class="studio-select" popper-class="studio-select-popper">
+                  <el-option v-for="option in geminiAspectRatioOptions" :key="option.value" :label="option.label" :value="option.value"/>
+                </el-select>
+              </el-form-item>
+              </template>
+              <template v-else>
               <el-form-item class="quick-control quick-size" label="尺寸">
                 <el-select v-model="size" class="studio-select" popper-class="studio-select-popper">
                   <el-option v-for="option in sizeOptions" :key="option.value" :label="option.label" :value="option.value" :disabled="sizeDisabled(option.value)">
@@ -1233,11 +1570,12 @@ onBeforeUnmount(() => {
                   </el-option>
                 </el-select>
               </el-form-item>
-              <el-form-item class="quick-control quick-count" label="数量"><el-input-number v-model="count" :min="1" :max="10" controls-position="right"/></el-form-item>
 <!--              <el-form-item class="quick-control quick-format" label="格式">-->
 <!--                <el-select v-model="format" class="studio-select" popper-class="studio-select-popper"><el-option label="PNG" value="png"/><el-option label="JPG" value="jpg"/><el-option label="WebP" value="webp"/></el-select>-->
 <!--              </el-form-item>-->
               <div v-if="size === 'custom'" class="quick-custom-size"><el-input-number v-model="customWidth" :min="256" :max="4096" :step="8"/><span>×</span><el-input-number v-model="customHeight" :min="256" :max="4096" :step="8"/></div>
+              </template>
+              <el-form-item class="quick-control quick-count" label="数量"><el-input-number v-model="count" :min="1" :max="10" controls-position="right"/></el-form-item>
             </div>
             <div class="prompt-surface" :class="{ 'is-resizing': promptResizeActive }">
               <button type="button" class="prompt-resize-handle" role="separator"
@@ -1296,20 +1634,11 @@ onBeforeUnmount(() => {
       <div v-else class="gallery">
         <div v-for="(item,index) in results" :key="item.id || index" class="result-card"
              :class="{ selected: selected.has(index) }">
-          <div v-if="item.loading" class="loading-placeholder">
+          <div v-if="item.loading && !item.url" class="loading-placeholder">
             <span>{{ item.status === 'generating' ? '正在加载图片...' : '等待生成' }}</span>
             <b>样片 {{ index + 1 }}</b>
 
             <el-button v-if="item.taskId" size="small" :icon="SwitchButton" @click="stopOne(index)">停止</el-button>
-          </div>
-          <div v-else-if="item.status === 'stopped'" class="result-stopped">
-            <strong>已停止生成</strong>
-            <el-button v-if="item.task || item.requestSnapshot" size="small" :icon="Refresh" @click="retry(index)">重试</el-button>
-          </div>
-          <div v-else-if="item.error" class="result-error" :class="{ 'result-uncertain': item.uncertain }">
-            <strong>{{ item.uncertain ? '结果待确认' : '生成失败' }}</strong>
-            <span>{{ item.error }}</span>
-            <el-button v-if="item.task && !item.uncertain" size="small" :icon="Refresh" @click="retry(index)">重试</el-button>
           </div>
           <template v-else-if="item.url">
             <el-image :src="item.url" fit="cover"
@@ -1324,6 +1653,15 @@ onBeforeUnmount(() => {
                 v-if="item.parentResultId">续作</small></span>
             <el-button v-if="item.task" size="small" :icon="Refresh" @click="retry(index)">再次生成</el-button>
           </template>
+          <div v-else-if="item.status === 'stopped'" class="result-stopped">
+            <strong>已停止生成</strong>
+            <el-button v-if="item.task || item.requestSnapshot" size="small" :icon="Refresh" @click="retry(index)">重试</el-button>
+          </div>
+          <div v-else-if="item.error" class="result-error" :class="{ 'result-uncertain': item.uncertain }">
+            <strong>{{ item.uncertain ? '结果待确认' : '生成失败' }}</strong>
+            <span>{{ item.error }}</span>
+            <el-button v-if="item.task && !item.uncertain" size="small" :icon="Refresh" @click="retry(index)">重试</el-button>
+          </div>
           <div v-else class="result-error">
             <strong>未生成图片</strong>
             <span>接口没有返回可预览的图片</span>

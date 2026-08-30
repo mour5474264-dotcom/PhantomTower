@@ -2,7 +2,7 @@
 import {computed, ref, onMounted} from 'vue'
 import {ElMessage, ElMessageBox} from 'element-plus'
 import {Plus, RotateCcw, Copy} from 'lucide-vue-next'
-import {getPromptTemplates, savePromptTemplates, getBuiltInPromptTemplates, saveBuiltInPromptTemplates, restoreDefaultBuiltInPromptTemplates, notifyPromptTemplatesChanged} from '../api'
+import {getPromptTemplates, savePromptTemplates, getBuiltInPromptTemplates, saveBuiltInPromptTemplates, restoreDefaultBuiltInPromptTemplates, notifyPromptTemplatesChanged, formatApiError} from '../api'
 
 const activeTab = ref('user')
 const templates = ref([])
@@ -31,7 +31,7 @@ async function loadTemplates() {
   try {
     templates.value = isBuiltIn.value ? await getBuiltInPromptTemplates() : await getPromptTemplates()
   } catch (error) {
-    ElMessage.error(error.message)
+    ElMessage.error(formatApiError(error, '预设读取失败'))
   }
 }
 
@@ -73,7 +73,7 @@ async function save() {
     if (!isBuiltIn.value) notifyPromptTemplatesChanged()
     dialog.value = false
     ElMessage.success('预设已保存')
-  } catch (error) { ElMessage.error(error.message) }
+  } catch (error) { ElMessage.error(formatApiError(error, '预设保存失败')) }
 }
 
 async function remove(id) {
@@ -83,7 +83,7 @@ async function remove(id) {
     templates.value = isBuiltIn.value ? await saveBuiltInPromptTemplates(next) : await savePromptTemplates(next)
     if (!isBuiltIn.value) notifyPromptTemplatesChanged()
     ElMessage.success('预设已删除')
-  } catch (error) { if (error !== 'cancel' && error !== 'close') ElMessage.error(error.message) }
+  } catch (error) { if (error !== 'cancel' && error !== 'close') ElMessage.error(formatApiError(error, '预设删除失败')) }
 }
 
 async function restoreDefaults() {
@@ -92,7 +92,7 @@ async function restoreDefaults() {
     await ElMessageBox.confirm('恢复出厂预设会覆盖当前所有内置提示词预设。', '恢复默认设置', {type: 'warning'})
     templates.value = await restoreDefaultBuiltInPromptTemplates()
     ElMessage.success('已恢复内置提示词预设')
-  } catch (error) { if (error !== 'cancel' && error !== 'close') ElMessage.error(error.message) }
+  } catch (error) { if (error !== 'cancel' && error !== 'close') ElMessage.error(formatApiError(error, '预设恢复失败')) }
 }
 
 onMounted(async () => {

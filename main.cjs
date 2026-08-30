@@ -169,6 +169,9 @@ app.whenReady().then(async () => {
   fs.mkdirSync(dataDir, { recursive: true })
   fs.mkdirSync(exportDir, { recursive: true })
   const serverEnv = { ...process.env, PHANTOMTOWER_DATA_DIR: dataDir, PHANTOMTOWER_EXPORT_DIR: exportDir }
+  serverEnv.PHANTOMTOWER_VISION_MODELS_DIR = app.isPackaged
+    ? path.join(process.resourcesPath, 'vision-models')
+    : path.join(__dirname, '..', 'vision-models')
   const logPath = path.join(dataDir, 'server.log')
   const log = fs.createWriteStream(logPath, { flags: 'a' })
   serverExitCode = null

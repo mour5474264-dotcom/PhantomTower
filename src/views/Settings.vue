@@ -2,7 +2,7 @@
 import { onMounted, onUnmounted, reactive, ref } from 'vue'
 import { Check, Download, FolderOpen, RefreshCw, Sparkles } from 'lucide-vue-next'
 import { ElMessage } from 'element-plus'
-import { getSettings, saveSettings } from '../api'
+import { getSettings, saveSettings, formatApiError } from '../api'
 
 const loading = ref(true)
 const saving = ref(false)
@@ -19,13 +19,13 @@ function apply(data = {}) {
   apis = data.apis || []; activeApiId = data.activeApiId || ''; settings.schemaVersion = data.schemaVersion || 2
   settings.preferences = { ...(data.preferences || {}) }; settings.storage = { exportDir: '', ...(data.storage || {}) }
 }
-async function load() { try { apply(await getSettings()) } catch (error) { ElMessage.error(error.message) } finally { loading.value = false } }
+async function load() { try { apply(await getSettings()) } catch (error) { ElMessage.error(formatApiError(error, '设置读取失败')) } finally { loading.value = false } }
 async function save(silent = false) {
   saving.value = true
   try {
     await saveSettings({ schemaVersion: 2, apis, activeApiId, preferences: settings.preferences, storage: settings.storage })
     savedAt.value = new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' }); if (!silent) ElMessage.success('设置已保存')
-  } catch (error) { if (!silent) { ElMessage.error(error.message); throw error } } finally { saving.value = false }
+  } catch (error) { if (!silent) { ElMessage.error(formatApiError(error, '设置保存失败')); throw error } } finally { saving.value = false }
 }
 async function chooseDirectory() {
   if (window.phantomTowerLicense?.chooseDirectory) {

@@ -2,7 +2,7 @@
 import {onMounted, ref} from 'vue'
 import {ElMessage} from 'element-plus'
 import {Plus, Trash2, CheckCircle2, Wifi, Edit3} from 'lucide-vue-next'
-import {getSettings, saveSettings, testApiConnection, notifyActiveApiChanged} from '../api'
+import {getSettings, saveSettings, testApiConnection, notifyActiveApiChanged, formatApiError} from '../api'
 
 const profiles = ref([])
 const activeId = ref('')
@@ -68,7 +68,7 @@ async function submit() {
     status.value = 'API 配置已保存';
     ElMessage.success(status.value)
   } catch (error) {
-    ElMessage.error(error.message)
+    ElMessage.error(formatApiError(error, 'API 配置保存失败'))
   }
 }
 
@@ -86,7 +86,7 @@ async function activate(id) {
     ElMessage.success('已切换 API')
   } catch (error) {
     activeId.value = previous;
-    ElMessage.error(error.message)
+    ElMessage.error(formatApiError(error, 'API 切换失败'))
   }
 }
 
@@ -125,7 +125,7 @@ async function test(item) {
       await persist()
     }
   } catch (e) {
-    ElMessage.error(`连接失败：${e.message}`)
+    ElMessage.error(`连接失败：\n${formatApiError(e, '连接测试失败')}`)
   } finally {
     testingId.value = ''
   }
@@ -137,7 +137,7 @@ onMounted(async () => {
     profiles.value = settings.apis || []
     activeId.value = settings.activeApiId || ''
   } catch (error) {
-    ElMessage.error(error.message)
+    ElMessage.error(formatApiError(error, 'API 配置读取失败'))
   }
 })
 </script>
