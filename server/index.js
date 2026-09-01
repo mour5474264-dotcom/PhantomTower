@@ -358,6 +358,16 @@ function dataUrlParts(value) {
     return match ? {mimeType: match[1], data: match[2]} : null
 }
 
+// Image providers may wrap a returned URL in Markdown link syntax. Normalize
+// it before fetching, caching, persisting, or returning it to the renderer.
+function normalizeImageUrl(value) {
+    let url = String(value || '').trim()
+    if (!url) return ''
+    const markdown = url.match(/^!?(?:\[[^\]]*\])\(\s*<?([^>\s]+)>?\s*\)$/i)
+    if (markdown?.[1]) url = markdown[1]
+    return url.replace(/^<|>$/g, '').replace(/^['"]|['"]$/g, '').trim()
+}
+
 const GEMINI_ASPECT_RATIOS = [
     {label: '1:1', value: 1},
     {label: '2:3', value: 2 / 3},
@@ -735,20 +745,21 @@ function generatedUrl(filename) {
 }
 
 async function resolveRecordImage(image) {
-    const currentUrl = String(image?.url || '')
+    const currentUrl = normalizeImageUrl(image?.url)
     if (currentUrl.startsWith('http://127.0.0.1:4317/api/generated/')) {
         try {
             const filename = decodeURIComponent(new URL(currentUrl).pathname.slice('/api/generated/'.length))
             await fs.access(path.join(generatedDir, filename))
-            return image
+            return currentUrl === image?.url ? image : {...image, url: currentUrl}
         } catch {
             // Fall through to the durable provider URL or embedded image data.
         }
     } else if (currentUrl || image?.b64_json) {
-        return image
+        return currentUrl === image?.url ? image : {...image, url: currentUrl}
     }
-    if (typeof image?.sourceUrl === 'string' && /^https?:\/\//i.test(image.sourceUrl)) {
-        return {...image, url: image.sourceUrl}
+    const sourceUrl = normalizeImageUrl(image?.sourceUrl)
+    if (/^https?:\/\//i.test(sourceUrl)) {
+        return {...image, url: sourceUrl, sourceUrl}
     }
     if (typeof image?.b64_json === 'string' && image.b64_json) {
         const mimeType = image.mime_type || image.content_type || 'image/png'
@@ -1331,12 +1342,12 @@ http.createServer(async (req, res) => {
             // on the same pending promise through getDownloadImage().
             const persistedImages = images.map((image) => {
                 const contentType = image?.mime_type || image?.content_type || 'image/png'
-                const source = image?.url || (image?.b64_json ? `data:${contentType};base64,${image.b64_json}` : '')
+                const source = normalizeImageUrl(image?.url) || (image?.b64_json ? `data:${contentType};base64,${image.b64_json}` : '')
                 if (!source) return image
                 cacheImageInBackground(source).catch((error) => {
                     console.error('image cache failed:', error.message)
                 })
-                return {...image, url: source, sourceUrl: image.url || source}
+                return {...image, url: source, sourceUrl: normalizeImageUrl(image.url) || source}
             })
             const recordImages = await Promise.all(persistedImages.map(async (image) => ({
                 ...(await externalizeRecordImage(image)),

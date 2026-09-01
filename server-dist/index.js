@@ -768,6 +768,13 @@ function dataUrlParts(value) {
 		data: match[2]
 	} : null;
 }
+function normalizeImageUrl(value) {
+	let url = String(value || "").trim();
+	if (!url) return "";
+	const markdown = url.match(/^!?(?:\[[^\]]*\])\(\s*<?([^>\s]+)>?\s*\)$/i);
+	if (markdown?.[1]) url = markdown[1];
+	return url.replace(/^<|>$/g, "").replace(/^['"]|['"]$/g, "").trim();
+}
 var GEMINI_ASPECT_RATIOS = [
 	{
 		label: "1:1",
@@ -1164,16 +1171,24 @@ function generatedUrl(filename) {
 	return `http://127.0.0.1:4317/api/generated/${encodeURIComponent(filename)}`;
 }
 async function resolveRecordImage(image) {
-	const currentUrl = String(image?.url || "");
+	const currentUrl = normalizeImageUrl(image?.url);
 	if (currentUrl.startsWith("http://127.0.0.1:4317/api/generated/")) try {
 		const filename = decodeURIComponent(new URL(currentUrl).pathname.slice(15));
 		await fs.access(path.join(generatedDir, filename));
-		return image;
+		return currentUrl === image?.url ? image : {
+			...image,
+			url: currentUrl
+		};
 	} catch {}
-	else if (currentUrl || image?.b64_json) return image;
-	if (typeof image?.sourceUrl === "string" && /^https?:\/\//i.test(image.sourceUrl)) return {
+	else if (currentUrl || image?.b64_json) return currentUrl === image?.url ? image : {
 		...image,
-		url: image.sourceUrl
+		url: currentUrl
+	};
+	const sourceUrl = normalizeImageUrl(image?.sourceUrl);
+	if (/^https?:\/\//i.test(sourceUrl)) return {
+		...image,
+		url: sourceUrl,
+		sourceUrl
 	};
 	if (typeof image?.b64_json === "string" && image.b64_json) {
 		const mimeType = image.mime_type || image.content_type || "image/png";
@@ -1804,7 +1819,7 @@ http.createServer(async (req, res) => {
 			if (controller.signal.aborted) return;
 			const persistedImages = images.map((image) => {
 				const contentType = image?.mime_type || image?.content_type || "image/png";
-				const source = image?.url || (image?.b64_json ? `data:${contentType};base64,${image.b64_json}` : "");
+				const source = normalizeImageUrl(image?.url) || (image?.b64_json ? `data:${contentType};base64,${image.b64_json}` : "");
 				if (!source) return image;
 				cacheImageInBackground(source).catch((error) => {
 					console.error("image cache failed:", error.message);
@@ -1812,7 +1827,7 @@ http.createServer(async (req, res) => {
 				return {
 					...image,
 					url: source,
-					sourceUrl: image.url || source
+					sourceUrl: normalizeImageUrl(image.url) || source
 				};
 			});
 			const recordImages = await Promise.all(persistedImages.map(async (image) => ({

@@ -13,7 +13,8 @@ import {
   cancelGeneration,
   exportImages,
   prepareEditImage,
-  formatApiError
+  formatApiError,
+  normalizeImageUrl
 } from '../api'
 
 const URL = {
@@ -104,9 +105,9 @@ function logGenerationResponse(kind, requestSnapshot, response) {
 
 function imageUrlFromOutput(output) {
   if (!output) return ''
-  if (typeof output === 'string') return output
-  const direct = output.url || output.image_url?.url || (typeof output.image_url === 'string' ? output.image_url : '')
-  if (direct) return direct
+  if (typeof output === 'string') return normalizeImageUrl(output)
+  const direct = output.url || output.sourceUrl || output.image_url?.url || (typeof output.image_url === 'string' ? output.image_url : '')
+  if (direct) return normalizeImageUrl(direct)
   const encoded = output.b64_json || output.base64 || output.base64Data || output.inlineData?.data || output.inline_data?.data
   if (!encoded) return ''
   if (/^data:image\//i.test(encoded)) return encoded

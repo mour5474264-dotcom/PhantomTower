@@ -1,5 +1,16 @@
 const BASE = 'http://127.0.0.1:4317'
 
+// Providers occasionally return an image URL wrapped as a Markdown link,
+// e.g. `[https://example.com/image.png](https://example.com/image.png)`.
+// Browser image elements need the destination URL itself.
+export function normalizeImageUrl(value) {
+    let url = String(value || '').trim()
+    if (!url) return ''
+    const markdown = url.match(/^!?(?:\[[^\]]*\])\(\s*<?([^>\s]+)>?\s*\)$/i)
+    if (markdown?.[1]) url = markdown[1]
+    return url.replace(/^<|>$/g, '').replace(/^['"]|['"]$/g, '').trim()
+}
+
 export function formatApiError(error, fallback = '操作失败') {
     if (!error) return fallback
     const details = error.details && typeof error.details === 'object' ? error.details : {}

@@ -2,7 +2,7 @@
 import {ref, onMounted, onBeforeUnmount} from 'vue'
 import {useRouter} from 'vue-router'
 import {Download, Maximize2, RefreshCw, Trash2, X} from 'lucide-vue-next'
-import {deleteAllRecords, deleteRecord, getRecords, downloadImage, exportImages, makeImageFilename, formatApiError} from '../api'
+import {deleteAllRecords, deleteRecord, getRecords, downloadImage, exportImages, makeImageFilename, formatApiError, normalizeImageUrl} from '../api'
 import {ElMessage, ElMessageBox} from 'element-plus'
 
 const records = ref([]);
@@ -27,9 +27,9 @@ function formatRecordTime(value) {
 
 function images(record) {
   return (record.images || []).map((item) => {
-    if (typeof item === 'string') return item
-    const direct = item?.url || item?.image_url?.url || (typeof item?.image_url === 'string' ? item.image_url : '')
-    if (direct) return direct
+    if (typeof item === 'string') return normalizeImageUrl(item)
+    const direct = item?.url || item?.sourceUrl || item?.image_url?.url || (typeof item?.image_url === 'string' ? item.image_url : '')
+    if (direct) return normalizeImageUrl(direct)
     const encoded = item?.b64_json || item?.base64 || item?.base64Data || item?.inlineData?.data || item?.inline_data?.data
     if (!encoded) return ''
     if (/^data:image\//i.test(encoded)) return encoded

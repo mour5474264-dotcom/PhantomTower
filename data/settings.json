@@ -15,7 +15,7 @@
         "imagePath": "/images/generations",
         "editPath": "/images/edits",
         "confidence": "verified",
-        "testedAt": "2026-08-30T07:56:09.567Z"
+        "testedAt": "2026-09-01T05:12:42.503Z"
       },
       "modelRoutes": {
         "gpt-image-2-high": {
@@ -25,7 +25,7 @@
           "imagePath": "/images/generations",
           "editPath": "/images/edits",
           "confidence": "verified",
-          "testedAt": "2026-08-30T07:56:09.567Z"
+          "testedAt": "2026-09-01T05:12:42.503Z"
         },
         "gpt-image-2-super": {
           "provider": "openai",
@@ -34,7 +34,7 @@
           "imagePath": "/images/generations",
           "editPath": "/images/edits",
           "confidence": "verified",
-          "testedAt": "2026-08-30T07:56:09.567Z"
+          "testedAt": "2026-09-01T05:12:42.503Z"
         }
       },
       "encryptedKey": "v1:y1Dvxa7L8EJP7sE4:4v+3KsfV1ZjAwU8g5OPgVA==:OqTPnHCQ73MR0ORvnB6j2ZDruHWW4NZcytYo3gnpzEj+ejjsTHlmg4HHRLmZAM+cFQFM"
@@ -674,18 +674,9 @@
         }
       },
       "encryptedKey": "v1:o9fFfEWk8/he+sCf:FqWX6lS0D2H3Ok7cDZb/eQ==:B9/xWTDYyYtt+2FVt/WakVHlNhrnU/95bJeO9rvuz/ILCS16a6HOJ2JKrFWg4HUeaDpofJYa1k7tO6x/sm7Y6GZyww=="
-    },
-    {
-      "name": "ai夯爆了",
-      "endpoint": "https://api.hangzhale.com",
-      "provider": "",
-      "id": "8a4c7a62-1531-4561-9509-e158bb9b33ff",
-      "secretId": "api-8a4c7a62-1531-4561-9509-e158bb9b33ff",
-      "secretConfigured": true,
-      "encryptedKey": "v1:9xB4bBtaOKBh2kay:OTM62Di1vNhijIqaCaIO1A==:cljc6E1vrhzkYIuUG/m0ea5JgfRiEaDomaz1J71CyXn+7DlMy4ktL7HLB43v7Xjx0ZJR1RIHiHbXvd+PR7w8brfFNA=="
     }
   ],
-  "activeApiId": "5695957d-c2c9-4561-87a4-56464f48f098",
+  "activeApiId": "741f4655-3561-4708-b4c6-56ad6a861af7",
   "schemaVersion": 2,
   "preferences": {},
   "storage": {
