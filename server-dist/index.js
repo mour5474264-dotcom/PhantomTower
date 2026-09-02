@@ -390,6 +390,7 @@ async function createPersonMask(image, options = {}) {
 //#region server/index.js
 var dataDir = process.env.PHANTOMTOWER_DATA_DIR || path.join(path.dirname(fileURLToPath(import.meta.url)), "../data");
 var generatedDir = path.join(dataDir, "generated");
+var assetsDir = path.join(dataDir, "assets");
 var exportDir = process.env.PHANTOMTOWER_EXPORT_DIR || path.join(dataDir, "export");
 var files = {
 	settings: path.join(dataDir, "settings.json"),
@@ -401,11 +402,14 @@ var files = {
 	builtInPromptTemplates: path.join(dataDir, "builtin-prompt-templates.json"),
 	defaultBuiltInPromptTemplates: path.join(dataDir, "builtin-prompt-templates.defaults.json"),
 	promptTemplateHistory: path.join(dataDir, "prompt-template-history.json"),
-	imageCache: path.join(dataDir, "image-cache.json")
+	imageCache: path.join(dataDir, "image-cache.json"),
+	generationLogs: path.join(dataDir, "generation-logs.json")
 };
 var activeGenerations = /* @__PURE__ */ new Map();
 var pendingImages = /* @__PURE__ */ new Map();
+var pendingGeneratedImages = /* @__PURE__ */ new Map();
 var recordsWriteQueue = Promise.resolve();
+var generationLogsWriteQueue = Promise.resolve();
 var secretKey = process.env.PHANTOMTOWER_SECRET_KEY || crypto.createHash("sha256").update("phantomtower-development-only").digest("hex");
 function encryptionKey() {
 	if (!/^[a-f0-9]{64}$/i.test(secretKey)) throw new Error("本地安全存储未初始化，请重启应用");
@@ -433,6 +437,62 @@ function publicApi(api) {
 		secretConfigured: Boolean(key || encryptedKey)
 	};
 }
+function normalizeModelConfig(model, fallbackRoute = {}) {
+	const source = model && typeof model === "object" ? model : { modelName: model };
+	const modelName = String(source.modelName || source.id || source.name || "").trim();
+	if (!modelName) return null;
+	const route = source.route || source;
+	const protocol = String(source.protocol || route.protocol || "").toLowerCase();
+	const inferredProvider = protocol.startsWith("gemini") ? "gemini" : protocol.startsWith("anthropic") ? "anthropic" : protocol === "mj-proxy" ? "mj" : "openai";
+	const routeKey = String(source.routeKey || `${protocol || fallbackRoute.protocol || "openai-images"}:${modelName}`);
+	const stableId = `model-${crypto.createHash("sha1").update(routeKey).digest("hex").slice(0, 16)}`;
+	return {
+		id: String(source.id || stableId),
+		routeKey,
+		routeSource: String(source.routeSource || "auto"),
+		confidence: String(source.confidence || fallbackRoute.confidence || "manual"),
+		name: String(source.name || source.displayName || modelName),
+		modelName,
+		provider: String(source.provider || route.provider || inferredProvider).toLowerCase(),
+		protocol,
+		imagePath: String(source.imagePath || route.imagePath || fallbackRoute.imagePath || "/images/generations"),
+		editPath: String(source.editPath || route.editPath || fallbackRoute.editPath || "/images/edits"),
+		authType: String(source.authType || route.authType || fallbackRoute.authType || ""),
+		capabilities: source.capabilities && typeof source.capabilities === "object" ? source.capabilities : {},
+		...Array.isArray(source.supportedSizes) ? { supportedSizes: source.supportedSizes } : {}
+	};
+}
+function normalizeApiModels(api) {
+	const fallbackRoute = api?.detectedRoute || {};
+	const existing = Array.isArray(api?.models) ? api.models : [];
+	const fromRoutes = existing.length ? [] : Object.entries(api?.modelRoutes && typeof api.modelRoutes === "object" ? api.modelRoutes : {}).filter(([key]) => !String(key).includes(":")).map(([modelName, route]) => normalizeModelConfig({
+		modelName: route?.modelName || modelName,
+		route
+	}, fallbackRoute));
+	const legacy = api?.model ? [normalizeModelConfig({ modelName: api.model }, fallbackRoute)] : [];
+	const all = [
+		...existing,
+		...fromRoutes,
+		...legacy
+	].map((item) => normalizeModelConfig(item, fallbackRoute)).filter(Boolean);
+	const byId = /* @__PURE__ */ new Map();
+	for (const item of all) if (!byId.has(item.id)) byId.set(item.id, item);
+	const models = [...byId.values()];
+	api.models = models;
+	api.modelRoutes = Object.fromEntries(models.map((item) => {
+		const route = {
+			provider: item.provider || api.provider || "",
+			protocol: item.protocol || fallbackRoute.protocol || "",
+			authType: item.authType || fallbackRoute.authType || "",
+			imagePath: item.imagePath,
+			editPath: item.editPath,
+			confidence: item.confidence || fallbackRoute.confidence || "manual",
+			...item.supportedSizes?.length ? { supportedSizes: item.supportedSizes } : {}
+		};
+		return [item.id, route];
+	}));
+	return models;
+}
 function publicSettings(settings) {
 	return {
 		...settings,
@@ -452,9 +512,10 @@ function configuredExportDir(value) {
 }
 async function migrateSettings() {
 	const current = await read(files.settings, {
-		schemaVersion: 2,
+		schemaVersion: 3,
 		apis: [],
 		activeApiId: "",
+		activeModelId: "",
 		preferences: {},
 		storage: {}
 	});
@@ -470,22 +531,27 @@ async function migrateSettings() {
 			next.secretId = `api-${next.id || crypto.randomUUID()}`;
 			changed = true;
 		}
+		const previousModels = JSON.stringify(next.models || null);
+		normalizeApiModels(next);
+		if (JSON.stringify(next.models || null) !== previousModels) changed = true;
 		return next;
 	}) : [];
-	if (current.schemaVersion !== 2 || changed) {
+	if (current.schemaVersion !== 3 || changed) {
 		if (changed) await write(`${files.settings}.migration-backup`, current);
 		await write(files.settings, {
 			...current,
-			schemaVersion: 2,
+			schemaVersion: 3,
 			apis,
+			activeModelId: current.activeModelId || "",
 			preferences: current.preferences || {},
 			storage: current.storage || {}
 		});
 	}
 	return {
 		...current,
-		schemaVersion: 2,
-		apis
+		schemaVersion: 3,
+		apis,
+		activeModelId: current.activeModelId || ""
 	};
 }
 function wait(ms) {
@@ -661,7 +727,40 @@ function referenceFilename(dataUrl, index) {
 	return `reference-${index + 1}.${imageExtension(contentType)}`;
 }
 async function upstreamJson(response, context = "上游 API") {
-	const text = await response.text();
+	let text;
+	try {
+		if (response?.body?.getReader) {
+			const reader = response.body.getReader();
+			const decoder = new TextDecoder();
+			let buffer = "";
+			while (true) {
+				const chunk = await reader.read();
+				if (chunk.done) {
+					buffer += decoder.decode();
+					break;
+				}
+				buffer += decoder.decode(chunk.value, { stream: true });
+				const trimmed = buffer.trimEnd();
+				if (!trimmed || !/[}\]]$/.test(trimmed)) continue;
+				try {
+					const parsed = JSON.parse(trimmed);
+					try {
+						await reader.cancel();
+					} catch {}
+					return parsed;
+				} catch {}
+			}
+			text = buffer;
+		} else text = await response.text();
+	} catch (error) {
+		if (response?._phantomTimeoutSignal?.aborted) {
+			const timeoutError = /* @__PURE__ */ new Error(`${context}返回内容超时；上游可能已经生成并计费，请先核对服务商记录，不要立即重复提交。`);
+			timeoutError.code = "UPSTREAM_RESPONSE_TIMEOUT";
+			timeoutError.generationTimedOut = true;
+			throw timeoutError;
+		}
+		throw error;
+	}
 	if (response.status === 524) {
 		const error = /* @__PURE__ */ new Error(`${context}响应超时（HTTP 524）。上游中转站可能已经接受请求并计费，但未能在规定时间内返回图片；请先到服务商记录确认，不要立即重复提交。`);
 		error.code = "UPSTREAM_524";
@@ -670,7 +769,13 @@ async function upstreamJson(response, context = "上游 API") {
 	try {
 		return text ? JSON.parse(text) : {};
 	} catch {
-		if (response.status === 502 || response.status === 503 || response.status === 504) throw new Error(`${context}暂时不可用（HTTP ${response.status}）。请稍后重试，或检查中转站服务状态。`);
+		if (response.status === 502 || response.status === 503 || response.status === 504) {
+			const plain = String(text || "").trim();
+			const error = new Error(plain && /content policy|safety|policy|违反.*内容|内容政策|moderation/i.test(plain) ? plain.slice(0, 1e3) : `${context}暂时不可用（HTTP ${response.status}）。请稍后重试，或检查中转站服务状态。`);
+			error.status = response.status;
+			error.upstreamBody = plain.slice(0, 2e3);
+			throw error;
+		}
 		if (response.status === 401 || response.status === 403) throw new Error(`${context}鉴权失败（HTTP ${response.status}）。请检查 API Key 和账号权限。`);
 		if (response.status === 404) throw new Error(`${context}地址不存在（HTTP 404）。请检查 API 地址和协议配置。`);
 		throw new Error(`${context}返回了无法识别的响应（HTTP ${response.status}）。请检查 API 地址、协议和模型是否匹配。`);
@@ -729,7 +834,11 @@ function messagesPayload(model, prompt, images = []) {
 	};
 }
 function messageImages(result) {
-	const content = result?.content || result?.data?.content || [];
+	const rawContent = result?.content || result?.data?.content || result?.choices?.[0]?.message?.content || [];
+	const content = typeof rawContent === "string" ? [{
+		type: "text",
+		text: rawContent
+	}] : rawContent;
 	const images = content.flatMap((part) => {
 		const data = part?.source?.data || part?.image?.data || part?.data;
 		if (!data || typeof data !== "string") return [];
@@ -744,7 +853,57 @@ function messageImages(result) {
 	return images;
 }
 function geminiUrl(api, model) {
-	return `${String(api.endpoint || "").trim().replace(/\/+$/, "").replace(/\/v1beta$|\/v1$|\/v1alpha$/i, "")}/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(api.key)}`;
+	return `${geminiEndpointRoot(api.endpoint)}/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(api.key)}`;
+}
+var MAX_ASSET_BYTES = 20971520;
+async function requestBuffer(req, maxBytes) {
+	if (Number(req.headers["content-length"] || 0) > maxBytes) {
+		const error = /* @__PURE__ */ new Error(`请求内容过大（上限 ${Math.floor(maxBytes / 1024 / 1024)} MB）`);
+		error.status = 413;
+		error.code = "PAYLOAD_TOO_LARGE";
+		throw error;
+	}
+	const chunks = [];
+	let total = 0;
+	for await (const chunk of req) {
+		const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+		total += buffer.length;
+		if (total > maxBytes) {
+			const error = /* @__PURE__ */ new Error(`请求内容过大（上限 ${Math.floor(maxBytes / 1024 / 1024)} MB）`);
+			error.status = 413;
+			error.code = "PAYLOAD_TOO_LARGE";
+			throw error;
+		}
+		chunks.push(buffer);
+	}
+	return Buffer.concat(chunks);
+}
+async function multipartForm(req, maxBytes = 22020096) {
+	const contentType = String(req.headers["content-type"] || "");
+	if (!/^multipart\/form-data\s*;/i.test(contentType)) {
+		const error = /* @__PURE__ */ new Error("请求必须使用 multipart/form-data");
+		error.status = 400;
+		error.code = "INVALID_MULTIPART_REQUEST";
+		throw error;
+	}
+	const body = await requestBuffer(req, maxBytes);
+	return new Request("http://127.0.0.1/", {
+		method: "POST",
+		headers: { "content-type": contentType },
+		body
+	}).formData();
+}
+function geminiEndpointRoot(value) {
+	let endpoint = String(value || "").trim().replace(/\/+$/, "");
+	try {
+		const url = new URL(endpoint);
+		url.search = "";
+		url.hash = "";
+		url.pathname = url.pathname.replace(/\/v1(?:beta|alpha)?(?:\/models(?:\/[^/]+(?::[^/]+)?)?)?$/i, "");
+		return url.toString().replace(/\/+$/, "");
+	} catch {
+		return endpoint.replace(/\/v1(?:beta|alpha)?(?:\/models(?:\/[^/]+(?::[^/]+)?)?)?$/i, "").replace(/\/+$/, "");
+	}
 }
 function safeEndpoint(value) {
 	try {
@@ -767,6 +926,106 @@ function dataUrlParts(value) {
 		mimeType: match[1],
 		data: match[2]
 	} : null;
+}
+function assetIdFromValue(value) {
+	const raw = typeof value === "object" ? value?.assetId : value;
+	if (typeof raw !== "string") return "";
+	const match = raw.match(/^(?:asset:)?([a-f0-9-]{16,80})(?:\.[a-z0-9]+)?$/i);
+	return match ? match[1] : "";
+}
+async function assetDataUrl(assetId) {
+	if (!assetId || !/^[a-f0-9-]{16,80}$/i.test(assetId)) return "";
+	const entry = (await fs.readdir(assetsDir, { withFileTypes: true }).catch(() => [])).find((item) => item.isFile() && item.name.startsWith(`${assetId}.`));
+	if (!entry) return "";
+	const buffer = await fs.readFile(path.join(assetsDir, entry.name));
+	return `data:${detectedImageContentType(buffer, imageContentType(entry.name))};base64,${buffer.toString("base64")}`;
+}
+async function resolveReferenceImage(value) {
+	const assetId = assetIdFromValue(value);
+	if (assetId) return await assetDataUrl(assetId) || "";
+	return value;
+}
+function routeForModel(api, model = "", modelConfigId = "") {
+	const configured = configuredModelFor(api, model, modelConfigId);
+	if (!configured) return detectedRoute(api, model);
+	const fallback = detectedRoute(api, configured.modelName);
+	const protocol = String(configured.protocol || fallback.protocol || "openai-images").toLowerCase();
+	const authType = protocol.startsWith("gemini") ? "query-key" : protocol.startsWith("anthropic") ? "x-api-key" : "bearer";
+	return {
+		provider: String(configured.provider || fallback.provider || "openai").toLowerCase(),
+		protocol,
+		authType,
+		imagePath: String(configured.imagePath || fallback.imagePath || "/images/generations"),
+		editPath: String(configured.editPath || fallback.editPath || "/images/edits"),
+		confidence: configured.confidence || fallback.confidence || "manual"
+	};
+}
+function dataUrlByteLength(value) {
+	const parts = dataUrlParts(value);
+	if (!parts) return 0;
+	return Math.floor(parts.data.length * 3 / 4) - (parts.data.endsWith("==") ? 2 : parts.data.endsWith("=") ? 1 : 0);
+}
+function appendGenerationLog(entry) {
+	generationLogsWriteQueue = generationLogsWriteQueue.then(async () => {
+		const logs = await read(files.generationLogs, []);
+		const next = Array.isArray(logs) ? logs : [];
+		const existingIndex = entry?.requestId ? next.findIndex((item) => item?.requestId === entry.requestId && (!entry.taskId || item?.taskId === entry.taskId)) : -1;
+		if (existingIndex >= 0) next[existingIndex] = {
+			...next[existingIndex],
+			...entry
+		};
+		else next.unshift(entry);
+		await write(files.generationLogs, next.slice(0, 500));
+	}).catch((error) => console.error("generation log write failed:", error.message));
+	return generationLogsWriteQueue;
+}
+function deleteAllGenerationLogs() {
+	generationLogsWriteQueue = generationLogsWriteQueue.catch(() => null).then(async () => {
+		const logs = await read(files.generationLogs, []);
+		const count = Array.isArray(logs) ? logs.length : 0;
+		await write(files.generationLogs, []);
+		return count;
+	}).catch((error) => {
+		console.error("generation log delete failed:", error.message);
+		throw error;
+	});
+	return generationLogsWriteQueue;
+}
+function deleteGenerationLogsForApi(apiId = "", upstreamName = "") {
+	const targetApiId = String(apiId || "");
+	const targetName = String(upstreamName || "");
+	if (!targetApiId && !targetName) return deleteAllGenerationLogs();
+	generationLogsWriteQueue = generationLogsWriteQueue.catch(() => null).then(async () => {
+		const logs = await read(files.generationLogs, []);
+		const source = Array.isArray(logs) ? logs : [];
+		const keep = source.filter((item) => {
+			if (targetApiId && item?.apiId === targetApiId) return false;
+			if (!item?.apiId && (targetApiId && String(item?.modelConfigId || "").startsWith(`${targetApiId}:`) || targetName && item?.upstreamName === targetName)) return false;
+			return true;
+		});
+		await write(files.generationLogs, keep);
+		return source.length - keep.length;
+	});
+	return generationLogsWriteQueue;
+}
+function openaiChatImagePayload(model, prompt, images = []) {
+	const content = [];
+	for (const image of images) content.push({
+		type: "image_url",
+		image_url: { url: image }
+	});
+	content.push({
+		type: "text",
+		text: prompt
+	});
+	return {
+		model,
+		messages: [{
+			role: "user",
+			content: images.length ? content : prompt
+		}],
+		stream: false
+	};
 }
 function normalizeImageUrl(value) {
 	let url = String(value || "").trim();
@@ -849,14 +1108,46 @@ function geminiPayload(input, prompt, images) {
 }
 function geminiImages(result) {
 	const images = [];
+	const seen = /* @__PURE__ */ new Set();
+	const parseSerialized = (value) => {
+		if (typeof value !== "string") return value;
+		const text = value.trim();
+		if (!text || !text.startsWith("[") && !text.startsWith("{")) return value;
+		try {
+			return JSON.parse(text);
+		} catch {
+			return value;
+		}
+	};
 	const addImage = (value, fallbackMimeType = "image/png") => {
 		if (!value) return;
 		if (typeof value === "string") {
-			if (/^https?:\/\//i.test(value)) images.push({ url: value });
-			else if (value.trim()) images.push({
-				b64_json: value.replace(/^data:[^;]+;base64,/, ""),
-				mime_type: fallbackMimeType
-			});
+			const text = value.trim();
+			if ((text.startsWith("[") || text.startsWith("{")) && text.length < 20971520) {
+				const parsed = parseSerialized(text);
+				if (parsed !== value) {
+					addImage(parsed, fallbackMimeType);
+					return;
+				}
+			}
+			for (const url of text.match(/(?:https?:\/\/|data:image\/)[^\s)\]"']+/gi) || []) {
+				const normalized = normalizeImageUrl(url);
+				if (normalized && !seen.has(normalized)) {
+					seen.add(normalized);
+					images.push({ url: normalized });
+				}
+			}
+			if (!/^https?:\/\//i.test(text) && !/^data:image\//i.test(text) && /^[A-Za-z0-9+/_=\-\r\n]+$/.test(text) && text.length > 128) {
+				const compact = text.replace(/[\r\n\t ]/g, "");
+				const key = `b64:${compact.slice(0, 32)}:${compact.length}`;
+				if (!seen.has(key)) {
+					seen.add(key);
+					images.push({
+						b64_json: compact,
+						mime_type: fallbackMimeType
+					});
+				}
+			}
 			return;
 		}
 		if (Array.isArray(value)) {
@@ -890,20 +1181,35 @@ function geminiImages(result) {
 		}
 		const data = value.b64_json || value.base64 || value.base64Data || value.data;
 		const url = value.url || value.image_url?.url || (typeof value.image_url === "string" ? value.image_url : "");
-		if (url) images.push({
-			...value,
-			url
-		});
-		else if (typeof data === "string" && data) images.push({
-			b64_json: data.replace(/^data:[^;]+;base64,/, ""),
-			mime_type: value.mime_type || value.mimeType || fallbackMimeType
-		});
+		if (url) {
+			const normalized = normalizeImageUrl(url);
+			if (normalized && !seen.has(normalized)) {
+				seen.add(normalized);
+				images.push({
+					...value,
+					url: normalized
+				});
+			}
+		} else if (typeof data === "string" && data) addImage(data, value.mime_type || value.mimeType || fallbackMimeType);
+		else if (typeof value.text === "string") addImage(value.text, fallbackMimeType);
 	};
-	(result?.candidates?.flatMap((candidate) => candidate?.content?.parts || []) || []).forEach((part) => addImage(part));
+	const serializedCandidates = parseSerialized(result?.candidates);
+	(Array.isArray(serializedCandidates) ? serializedCandidates : []).flatMap((candidate) => {
+		const content = parseSerialized(candidate?.content);
+		const rawParts = parseSerialized(content?.parts);
+		return Array.isArray(rawParts) ? rawParts : rawParts ? [rawParts] : [];
+	}).forEach((part) => addImage(part));
 	addImage(result?.data);
 	addImage(result?.images);
 	addImage(result?.output);
+	addImage(result?.choices?.[0]?.message?.images);
+	addImage(result?.choices?.[0]?.message?.content);
 	return images;
+}
+function openaiImages(result) {
+	if (Array.isArray(result?.data) && result.data.length) return result.data;
+	const images = geminiImages(result);
+	return images.length ? images : messageImages(result);
 }
 function diagnosticValue(value, depth = 0) {
 	if (typeof value === "string") return value.length > 2e3 ? `${value.slice(0, 2e3)}...[截断，共 ${value.length} 字符]` : value;
@@ -913,21 +1219,39 @@ function diagnosticValue(value, depth = 0) {
 	return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, /^(?:key|api[_-]?key|token|access[_-]?token|authorization)$/i.test(key) ? "[已隐藏]" : diagnosticValue(item, depth + 1)]));
 }
 function diagnosticCandidateParts(result) {
-	return (result?.candidates || []).flatMap((candidate, candidateIndex) => (candidate?.content?.parts || []).map((part, partIndex) => ({
-		candidateIndex,
-		partIndex,
-		keys: Object.keys(part || {}),
-		types: Object.fromEntries(Object.entries(part || {}).map(([key, value]) => [key, Array.isArray(value) ? "array" : typeof value])),
-		inlineDataKeys: part?.inlineData && typeof part.inlineData === "object" ? Object.keys(part.inlineData) : [],
-		inlineDataLength: typeof part?.inlineData?.data === "string" ? part.inlineData.data.length : 0,
-		snakeInlineDataKeys: part?.inline_data && typeof part.inline_data === "object" ? Object.keys(part.inline_data) : [],
-		snakeInlineDataLength: typeof part?.inline_data?.data === "string" ? part.inline_data.data.length : 0,
-		textPreview: typeof part?.text === "string" ? part.text.slice(0, 300) : ""
-	})));
+	return (Array.isArray(result?.candidates) ? result.candidates : []).flatMap((candidate, candidateIndex) => {
+		const content = typeof candidate?.content === "string" ? (() => {
+			try {
+				return JSON.parse(candidate.content);
+			} catch {
+				return {};
+			}
+		})() : candidate?.content || {};
+		const rawParts = typeof content.parts === "string" ? (() => {
+			try {
+				return JSON.parse(content.parts);
+			} catch {
+				return [content.parts];
+			}
+		})() : content.parts;
+		return (Array.isArray(rawParts) ? rawParts : rawParts ? [rawParts] : []).map((part, partIndex) => ({
+			candidateIndex,
+			partIndex,
+			keys: Object.keys(part || {}),
+			types: Object.fromEntries(Object.entries(part || {}).map(([key, value]) => [key, Array.isArray(value) ? "array" : typeof value])),
+			inlineDataKeys: part?.inlineData && typeof part.inlineData === "object" ? Object.keys(part.inlineData) : [],
+			inlineDataLength: typeof part?.inlineData?.data === "string" ? part.inlineData.data.length : 0,
+			snakeInlineDataKeys: part?.inline_data && typeof part.inline_data === "object" ? Object.keys(part.inline_data) : [],
+			snakeInlineDataLength: typeof part?.inline_data?.data === "string" ? part.inline_data.data.length : 0,
+			textPreview: typeof part?.text === "string" ? part.text.slice(0, 300) : ""
+		}));
+	});
 }
 function friendlyProviderError(result, status, referenceRequest = false) {
 	const raw = typeof result === "string" ? result : result?.error?.message || result?.error || result?.message || "";
 	const text = String(raw);
+	if (status === 503 && /no available channel|available channel|渠道|分组/i.test(text)) return "中转站当前没有可用的模型渠道，通常是模型分组未配置、渠道暂时下线或账户无该模型权限；这不是图片尺寸错误。";
+	if (status === 503 && /content policy|safety|policy|违反.*内容|内容政策|moderation/i.test(text)) return "图片请求被上游内容安全策略拦截（HTTP 503）。请删减或改写可能触发审核的描述，避免真实人物、未成年人、裸露、暴力等敏感内容后重试；本次请求通常不会返回图片。";
 	if (/insufficient\s+(?:account\s+)?balance|余额不足|账户余额不足/i.test(text)) return "中转站账户余额不足，Gemini 请求未执行。请为该中转站充值或更换有余额的 API 配置。";
 	if (status === 400 && /(?:invalid|unsupported|not supported).{0,80}(?:size|dimension|resolution|width|height)|(?:size|dimension|resolution|width|height).{0,80}(?:invalid|unsupported|not supported)/i.test(text)) return "当前模型或中转站不支持所选图片尺寸。请改用 1K（1024x1024），或选择模型支持的尺寸。";
 	if (status === 413) return "图片请求过大，当前模型或中转站无法处理该尺寸或参考图。请改用 1K（1024x1024），或减少参考图数量后重试。";
@@ -938,16 +1262,34 @@ function friendlyProviderError(result, status, referenceRequest = false) {
 function upstreamFetchError(error, context, size = "") {
 	const code = String(error?.cause?.code || error?.code || "");
 	const sizeText = size ? `（请求尺寸 ${size}）` : "";
+	if (error?.code === "UPSTREAM_RESPONSE_TIMEOUT") return `${context}返回内容超时${sizeText}。中转站可能已经受理并消费，请先核对服务商记录，不要立即重复提交。`;
 	if (error?.generationTimedOut || error?.name === "AbortError") return `${context}超时${sizeText}。图片生成耗时过长，请稍后重试；也可改用 1K（1024x1024）。`;
 	if (code === "ENOTFOUND" || code === "EAI_AGAIN") return `无法解析图片服务地址${sizeText}。请检查网络、DNS 或 API 地址后重试。`;
 	if (code === "ECONNREFUSED" || code === "ECONNRESET" || code === "ETIMEDOUT" || code === "UND_ERR_CONNECT_TIMEOUT") return `无法连接图片服务${sizeText}。请检查网络、代理或中转站状态后重试。`;
 	return `${context}网络连接失败${sizeText}。请检查网络、代理和中转站状态后重试。`;
 }
 async function fetchImageGeneration(url, options) {
-	return fetch(url, {
-		...options,
-		signal: options.signal
-	});
+	const timeoutMs = Number(options.timeoutMs || process.env.PHANTOMTOWER_UPSTREAM_TIMEOUT_MS || 6e5);
+	const timeoutSignal = AbortSignal.timeout(timeoutMs);
+	const signal = options.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;
+	try {
+		const startedAt = Date.now();
+		const response = await fetch(url, {
+			...options,
+			signal
+		});
+		response._phantomTimeoutSignal = timeoutSignal;
+		response._phantomHeadersDurationMs = Date.now() - startedAt;
+		return response;
+	} catch (error) {
+		if (timeoutSignal.aborted && !options.signal?.aborted) {
+			const timeoutError = /* @__PURE__ */ new Error("上游图片接口响应超时；请求可能已被中转站受理，请先核对服务商记录后再重试。");
+			timeoutError.code = "UPSTREAM_RESPONSE_TIMEOUT";
+			timeoutError.generationTimedOut = true;
+			throw timeoutError;
+		}
+		throw error;
+	}
 }
 function appendGenerationRecord(record) {
 	recordsWriteQueue = recordsWriteQueue.catch(() => null).then(async () => {
@@ -980,10 +1322,9 @@ function appendGenerationOptions(form, payload, input) {
 	form.append("model", String(payload.model));
 	form.append("prompt", String(payload.prompt));
 	form.append("n", "1");
-	form.append("quality", String(payload.quality));
+	if (payload.quality) form.append("quality", String(payload.quality));
 	if (input.size && input.size !== "auto") form.append("size", input.size);
-	if (input.resolution) form.append("resolution", input.resolution);
-	if (input.format) form.append("output_format", input.format);
+	form.append("response_format", "url");
 }
 function promptTemplateOperation(operation, mode) {
 	return {
@@ -1000,10 +1341,105 @@ async function activeApi() {
 		key: decryptSecret(api.encryptedKey)
 	} : null;
 }
+function upstreamRequestId(result) {
+	if (!result || typeof result !== "object") return "";
+	return String(result.request_id || result.requestId || result.id || result.error?.request_id || result.error?.requestId || "").trim();
+}
+async function generateMjImage(api, model, prompt, images, signal) {
+	const endpoint = String(api.endpoint || "").replace(/\/+$/, "");
+	const headers = {
+		"Authorization": `Bearer ${api.key}`,
+		"Content-Type": "application/json"
+	};
+	const submitResponse = await fetch(`${endpoint}/mj/submit/imagine`, {
+		method: "POST",
+		headers,
+		body: JSON.stringify({
+			prompt,
+			base64Array: images || []
+		}),
+		signal
+	});
+	const submitted = await upstreamJson(submitResponse, "MJ 提交接口");
+	if (!submitResponse.ok || submitted.code !== void 0 && submitted.code !== 1) throw new Error(submitted.description || submitted.error?.message || "MJ 任务提交失败");
+	const upstreamTaskId = String(submitted.result || submitted.taskId || "");
+	if (!upstreamTaskId) throw new Error("MJ 接口未返回任务 ID");
+	for (let attempt = 0; attempt < 120; attempt += 1) {
+		if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+		await wait(attempt === 0 ? 1e3 : 5e3);
+		const queryResponse = await fetch(`${endpoint}/mj/task/${encodeURIComponent(upstreamTaskId)}/fetch`, {
+			headers,
+			signal
+		});
+		const queried = await upstreamJson(queryResponse, "MJ 查询接口");
+		if (!queryResponse.ok) throw new Error(queried.description || queried.error?.message || "MJ 查询失败");
+		const status = String(queried.status || "").toUpperCase();
+		if (status === "FAILURE" || status === "FAILED" || status === "ERROR") throw new Error(queried.failReason || queried.error || "MJ 图片生成失败");
+		if (status === "SUCCESS" || queried.imageUrl) {
+			const url = normalizeImageUrl(queried.imageUrl);
+			if (url) return { data: [{
+				url,
+				model
+			}] };
+		}
+	}
+	throw new Error("MJ 图片生成超时，请到中转站任务记录确认状态");
+}
+async function apiForModel(modelName, modelConfigId = "") {
+	const settings = await migrateSettings();
+	const requested = String(modelName || "").trim();
+	const rawConfigId = String(modelConfigId || "").trim();
+	if (rawConfigId) for (const stored of settings.apis || []) {
+		const api = {
+			...stored,
+			key: decryptSecret(stored.encryptedKey)
+		};
+		if (normalizeApiModels(api).some((item) => `${stored.id}:${item.id}` === rawConfigId)) {
+			const matched = normalizeApiModels(api).find((item) => `${stored.id}:${item.id}` === rawConfigId);
+			if (!requested || matched.modelName === requested || requested === matched.id || requested === rawConfigId) return api;
+		}
+	}
+	const separator = rawConfigId.indexOf(":");
+	const configApiId = separator > 0 ? rawConfigId.slice(0, separator) : "";
+	const configModelId = separator > 0 ? rawConfigId.slice(separator + 1) : rawConfigId;
+	const ordered = [...settings.apis].sort((a, b) => a.id === settings.activeApiId ? -1 : b.id === settings.activeApiId ? 1 : 0);
+	for (const stored of ordered) {
+		if (configApiId && String(stored.id) !== configApiId) continue;
+		const api = {
+			...stored,
+			key: decryptSecret(stored.encryptedKey)
+		};
+		const models = normalizeApiModels(api);
+		if (!modelConfigId) {
+			if (!requested || models.some((item) => item.modelName === requested)) return api;
+			continue;
+		}
+		const matched = models.find((item) => String(item.id) === configModelId || item.modelName === configModelId || String(item.id) === rawConfigId || requested && item.modelName === requested);
+		if (matched && (!requested || matched.modelName === requested || requested === matched.id || requested === configModelId || requested === rawConfigId)) return api;
+	}
+	if (rawConfigId && requested) for (const stored of ordered) {
+		const api = {
+			...stored,
+			key: decryptSecret(stored.encryptedKey)
+		};
+		if (normalizeApiModels(api).some((item) => item.modelName === requested || String(item.id) === requested)) return api;
+	}
+	return null;
+}
+function configuredModelFor(api, modelName = "", modelConfigId = "") {
+	const models = normalizeApiModels(api || {});
+	const requested = String(modelName || "").trim();
+	const rawConfigId = String(modelConfigId || "").trim();
+	const separator = rawConfigId.indexOf(":");
+	const configModelId = separator > 0 ? rawConfigId.slice(separator + 1) : rawConfigId;
+	if (rawConfigId) return models.find((item) => String(item.id) === configModelId || String(item.id) === rawConfigId) || null;
+	const matches = models.filter((item) => requested && (item.modelName === requested || String(item.id) === requested));
+	return matches.length === 1 ? matches[0] : null;
+}
 async function fetchModels(api) {
 	if (!api?.endpoint || !api?.key) throw new Error("请填写 API 地址和 API Key");
 	const provider = apiProvider(api);
-	const response = provider === "gemini" ? await fetch(`${String(api.endpoint).replace(/\/+$/, "").replace(/\/v1beta$|\/v1$|\/v1alpha$/i, "")}/v1beta/models?key=${encodeURIComponent(api.key)}`) : await fetch(apiUrl(api.endpoint, "models"), { headers: { Authorization: `Bearer ${api.key}` } });
+	const response = provider === "gemini" ? await fetch(`${geminiEndpointRoot(api.endpoint)}/v1beta/models?key=${encodeURIComponent(api.key)}`) : await fetch(apiUrl(api.endpoint, "models"), { headers: { Authorization: `Bearer ${api.key}` } });
 	const payload = await upstreamJson(response, "模型接口");
 	if (provider === "gemini" && response.ok) return {
 		status: 200,
@@ -1023,6 +1459,25 @@ async function fetchModels(api) {
 		status: response.status,
 		payload
 	};
+}
+async function configuredModels() {
+	const settings = await migrateSettings();
+	const result = [];
+	const api = (settings.apis || []).find((item) => item.id === settings.activeApiId);
+	if (!api) return result;
+	for (const model of normalizeApiModels({ ...api })) result.push({
+		id: `${api.id}:${model.id}`,
+		name: model.name,
+		upstreamId: api.id,
+		upstreamName: api.name,
+		provider: model.provider || api.provider || "",
+		protocol: model.protocol || api.detectedRoute?.protocol || "",
+		imagePath: model.imagePath,
+		editPath: model.editPath,
+		authType: model.authType,
+		...model.supportedSizes?.length ? { supportedSizes: model.supportedSizes } : {}
+	});
+	return result;
 }
 async function detectConnection(api) {
 	if (!api?.endpoint || !api?.key) throw new Error("请填写 API 地址和 API Key");
@@ -1055,13 +1510,15 @@ async function detectConnection(api) {
 			authType: "query-key",
 			imagePath: "",
 			editPath: "",
-			request: () => fetch(`${endpoint.replace(/\/v1beta$|\/v1$|\/v1alpha$/i, "")}/v1beta/models?key=${encodeURIComponent(api.key)}`),
+			request: () => fetch(`${geminiEndpointRoot(endpoint)}/v1beta/models?key=${encodeURIComponent(api.key)}`),
 			models: (payload) => geminiModelSource(payload).filter(supportsGeminiGeneration)
 		}
 	];
 	const requested = String(api.provider || "").toLowerCase();
-	const ordered = requested ? [...probes.filter((probe) => probe.provider === requested), ...probes.filter((probe) => probe.provider !== requested)] : probes;
+	const ordered = requested ? probes.filter((probe) => probe.provider === requested) : probes;
 	const failures = [];
+	const detections = [];
+	const discovered = [];
 	for (const probe of ordered) {
 		let response;
 		try {
@@ -1071,23 +1528,39 @@ async function detectConnection(api) {
 				failures.push(`${probe.provider}: HTTP ${response.status}`);
 				continue;
 			}
-			return {
-				status: 200,
-				payload: {
-					data: probe.models(payload).map(modelWithCapabilities).filter((item) => item.id),
-					detection: {
-						...probe,
-						request: void 0,
-						models: void 0,
-						confidence: "verified",
-						testedAt: (/* @__PURE__ */ new Date()).toISOString()
-					}
-				}
+			const detection = {
+				...probe,
+				request: void 0,
+				models: void 0,
+				confidence: "verified",
+				testedAt: (/* @__PURE__ */ new Date()).toISOString()
 			};
+			const models = probe.models(payload).map(modelWithCapabilities).filter((item) => item.id);
+			detections.push(detection);
+			discovered.push(...models.map((item) => ({
+				...item,
+				provider: probe.provider,
+				protocol: probe.protocol,
+				authType: probe.authType,
+				imagePath: probe.imagePath,
+				editPath: probe.editPath,
+				confidence: "verified",
+				testedAt: detection.testedAt
+			})));
 		} catch (error) {
 			failures.push(`${probe.provider}: ${error.message}`);
 		}
 	}
+	if (detections.length) return {
+		status: 200,
+		payload: {
+			data: discovered,
+			detection: detections.find((item) => item.provider === String(api.provider || "").toLowerCase()) || detections[0],
+			detections,
+			ambiguousModels: [...new Set(discovered.map((item) => item.id).filter((id) => discovered.filter((item) => item.id === id).length > 1))]
+		}
+	};
+	if (requested) throw new Error(`无法连接所选协议（${requested}）：${failures.join("；")}`);
 	throw new Error(`无法识别中转站协议。已尝试 OpenAI、Anthropic 和 Gemini：${failures.join("；")}`);
 }
 function cacheKey(url) {
@@ -1277,7 +1750,7 @@ async function persistImage(url) {
 		if (!match) throw new Error("invalid image data");
 		const buffer = Buffer.from(match[2], "base64");
 		const contentType = detectedImageContentType(buffer, match[1]);
-		const filename = `${cacheKey(url)}.${imageExtension(contentType)}`;
+		const filename = `${cacheKey(url)}.${imageExtension(match[1])}`;
 		const file = path.join(generatedDir, filename);
 		await fs.mkdir(generatedDir, { recursive: true });
 		try {
@@ -1313,8 +1786,12 @@ function cacheImageInBackground(url) {
 async function externalizeRecordImage(image) {
 	const value = { ...image || {} };
 	const inlineData = typeof value.b64_json === "string" && value.b64_json;
-	if (!inlineData) return value;
-	if (!value.url || /^data:image\//i.test(value.url)) value.url = generatedUrl((await cacheImageInBackground(`data:${value.mime_type || value.content_type || "image/png"};base64,${inlineData}`)).filename);
+	const inlineUrl = /^data:image\//i.test(String(value.url || "")) ? value.url : "";
+	if (!inlineData && !inlineUrl) return value;
+	if (inlineUrl || !value.url) {
+		const contentType = value.mime_type || value.content_type || dataUrlParts(inlineUrl)?.mimeType || "image/png";
+		value.url = generatedUrl((await cacheImageInBackground(inlineUrl || `data:${contentType};base64,${inlineData}`)).filename);
+	}
 	if (/^data:image\//i.test(String(value.sourceUrl || ""))) delete value.sourceUrl;
 	delete value.b64_json;
 	return value;
@@ -1346,6 +1823,14 @@ async function getDownloadImage(url) {
 		return {
 			buffer,
 			contentType: detectedImageContentType(buffer, match[1])
+		};
+	}
+	const pendingGenerated = pendingGeneratedImages.get(url);
+	if (pendingGenerated) {
+		const entry = await pendingGenerated;
+		return {
+			buffer: await fs.readFile(entry.file),
+			contentType: entry.contentType
 		};
 	}
 	if (/^https?:/i.test(url) && !url.startsWith("http://127.0.0.1:4317/api/generated/")) {
@@ -1396,6 +1881,41 @@ http.createServer(async (req, res) => {
 			exportDir
 		});
 		if (req.url === "/api/vision/status" && req.method === "GET") return send(res, 200, await visionStatus());
+		if (req.url === "/api/assets/upload" && req.method === "POST") {
+			const file = (await multipartForm(req)).get("file");
+			if (!file || typeof file.arrayBuffer !== "function") return send(res, 400, {
+				error: "缺少图片文件",
+				code: "MISSING_ASSET_FILE"
+			});
+			const contentType = String(file.type || "application/octet-stream").split(";")[0].toLowerCase();
+			if (!contentType.startsWith("image/")) return send(res, 400, {
+				error: "只支持图片文件",
+				code: "INVALID_ASSET_TYPE"
+			});
+			const buffer = Buffer.from(await file.arrayBuffer());
+			if (buffer.length > MAX_ASSET_BYTES) return send(res, 413, {
+				error: "单张图片不能超过 20 MB",
+				code: "ASSET_TOO_LARGE",
+				maxBytes: MAX_ASSET_BYTES
+			});
+			const detectedType = detectedImageContentType(buffer, contentType);
+			const hash = crypto.createHash("sha256").update(buffer).digest("hex");
+			const filename = `${hash}.${imageExtension(detectedType)}`;
+			await fs.mkdir(assetsDir, { recursive: true });
+			const assetPath = path.join(assetsDir, filename);
+			try {
+				await fs.access(assetPath);
+			} catch {
+				await fs.writeFile(assetPath, buffer);
+			}
+			return send(res, 200, {
+				ok: true,
+				assetId: `asset:${hash}`,
+				filename,
+				size: buffer.length,
+				contentType: detectedType
+			});
+		}
 		if (req.url === "/api/vision/mask" && req.method === "POST") {
 			const input = await json(req);
 			if (!input.image) return send(res, 400, {
@@ -1404,9 +1924,15 @@ http.createServer(async (req, res) => {
 				code: "INVALID_IMAGE_DATA"
 			});
 			try {
+				const image = await resolveReferenceImage(input.image);
+				if (!image) return send(res, 400, {
+					ok: false,
+					error: "图片资源不存在",
+					code: "ASSET_NOT_FOUND"
+				});
 				return send(res, 200, {
 					ok: true,
-					...await createPersonMask(input.image, input)
+					...await createPersonMask(image, input)
 				});
 			} catch (error) {
 				return send(res, error.code === "VISION_MODELS_NOT_INSTALLED" ? 503 : 422, {
@@ -1449,6 +1975,7 @@ http.createServer(async (req, res) => {
 				if (next.key) next.encryptedKey = encryptSecret(next.key);
 				else if (previous?.encryptedKey) next.encryptedKey = previous.encryptedKey;
 				delete next.key;
+				normalizeApiModels(next);
 				return {
 					...next,
 					secretId: next.secretId || previous?.secretId || `api-${next.id || crypto.randomUUID()}`
@@ -1460,9 +1987,10 @@ http.createServer(async (req, res) => {
 			exportDir = nextExportDir;
 			await write(files.settings, {
 				...current,
-				schemaVersion: 2,
+				schemaVersion: 3,
 				apis,
 				activeApiId: String(input.activeApiId ?? current.activeApiId ?? ""),
+				activeModelId: String(input.activeModelId ?? current.activeModelId ?? ""),
 				preferences: input.preferences || current.preferences || {},
 				storage: {
 					...nextStorage,
@@ -1497,10 +2025,88 @@ http.createServer(async (req, res) => {
 			...item,
 			version: 0
 		})), files.builtInPromptTemplates));
-		if (req.url === "/api/records" && req.method === "GET") {
+		if (req.method === "GET" && new URL(req.url, "http://127.0.0.1").pathname === "/api/records") {
 			const records = await read(files.records, []);
-			return send(res, 200, await resolveRecordImages(Array.isArray(records) ? records : []));
+			const source = Array.isArray(records) ? records : [];
+			const query = new URL(req.url, "http://127.0.0.1").searchParams;
+			if (![
+				"page",
+				"pageSize",
+				"startTime",
+				"endTime"
+			].some((key) => query.has(key))) return send(res, 200, await resolveRecordImages(source));
+			const page = Math.max(1, Number.parseInt(query.get("page") || "1", 10) || 1);
+			const pageSize = Math.min(50, Math.max(1, Number.parseInt(query.get("pageSize") || "10", 10) || 10));
+			const startTime = query.get("startTime") || "";
+			const endTime = query.get("endTime") || "";
+			const start = startTime ? Date.parse(startTime) : NaN;
+			const end = endTime ? Date.parse(endTime) : NaN;
+			if (startTime && Number.isNaN(start) || endTime && Number.isNaN(end)) return send(res, 400, { error: "时间筛选条件无效" });
+			if (!Number.isNaN(start) && !Number.isNaN(end) && start > end) return send(res, 400, { error: "开始时间不能晚于结束时间" });
+			const filtered = source.filter((record) => {
+				const createdAt = Date.parse(record?.createdAt || "");
+				if (Number.isNaN(createdAt)) return false;
+				return (Number.isNaN(start) || createdAt >= start) && (Number.isNaN(end) || createdAt <= end);
+			});
+			const offset = (page - 1) * pageSize;
+			return send(res, 200, {
+				data: await resolveRecordImages(filtered.slice(offset, offset + pageSize)),
+				total: filtered.length,
+				page,
+				pageSize,
+				startTime,
+				endTime
+			});
 		}
+		const generationLogsUrl = new URL(req.url, "http://127.0.0.1");
+		if (generationLogsUrl.pathname === "/api/generation-logs" && req.method === "GET") {
+			const logs = await read(files.generationLogs, []);
+			const latest = /* @__PURE__ */ new Map();
+			for (const item of Array.isArray(logs) ? logs : []) {
+				const key = item?.requestId || `${item?.createdAt || ""}:${item?.taskId || ""}`;
+				if (!latest.has(key)) latest.set(key, item);
+			}
+			const page = Math.max(1, Number.parseInt(generationLogsUrl.searchParams.get("page") || "1", 10) || 1);
+			const pageSize = Math.min(100, Math.max(10, Number.parseInt(generationLogsUrl.searchParams.get("pageSize") || "20", 10) || 20));
+			const startTime = generationLogsUrl.searchParams.get("startTime") || "";
+			const endTime = generationLogsUrl.searchParams.get("endTime") || "";
+			const apiId = generationLogsUrl.searchParams.get("apiId") || "";
+			const upstreamName = generationLogsUrl.searchParams.get("upstreamName") || "";
+			const keyword = String(generationLogsUrl.searchParams.get("keyword") || "").trim().toLowerCase();
+			const start = startTime ? Date.parse(startTime) : NaN;
+			const end = endTime ? Date.parse(endTime) : NaN;
+			if (startTime && Number.isNaN(start) || endTime && Number.isNaN(end)) return send(res, 400, { error: "日志时间筛选条件无效" });
+			if (!Number.isNaN(start) && !Number.isNaN(end) && start > end) return send(res, 400, { error: "开始时间不能晚于结束时间" });
+			const filtered = [...latest.values()].filter((item) => {
+				const createdAt = Date.parse(item?.createdAt || "");
+				if ((startTime || endTime) && (Number.isNaN(createdAt) || !Number.isNaN(start) && createdAt < start || !Number.isNaN(end) && createdAt > end)) return false;
+				if (apiId && item?.apiId !== apiId && (item?.apiId || !String(item?.modelConfigId || "").startsWith(`${apiId}:`) && item?.upstreamName !== upstreamName)) return false;
+				if (!keyword) return true;
+				return [
+					item?.modelDisplayName,
+					item?.model,
+					item?.upstreamName,
+					item?.requestId,
+					item?.status,
+					item?.error,
+					item?.upstreamBody
+				].filter(Boolean).join("\n").toLowerCase().includes(keyword);
+			});
+			const offset = (page - 1) * pageSize;
+			return send(res, 200, {
+				data: filtered.slice(offset, offset + pageSize),
+				total: filtered.length,
+				page,
+				pageSize,
+				startTime,
+				endTime,
+				keyword
+			});
+		}
+		if (generationLogsUrl.pathname === "/api/generation-logs" && req.method === "DELETE") return send(res, 200, {
+			ok: true,
+			count: await deleteGenerationLogsForApi(generationLogsUrl.searchParams.get("apiId") || "", generationLogsUrl.searchParams.get("upstreamName") || "")
+		});
 		if (req.url === "/api/records" && req.method === "DELETE") return send(res, 200, {
 			ok: true,
 			count: await deleteAllGenerationRecords()
@@ -1589,6 +2195,8 @@ http.createServer(async (req, res) => {
 			});
 		}
 		if (req.url === "/api/models" && req.method === "GET") {
+			const configured = await configuredModels();
+			if (configured.length) return send(res, 200, { data: configured });
 			const api = await activeApi();
 			if (!api) return send(res, 400, { error: "请先配置并启用 API" });
 			const result = await fetchModels(api);
@@ -1606,7 +2214,29 @@ http.createServer(async (req, res) => {
 			const result = await detectConnection(api);
 			if (result.status === 200 && api.id) {
 				const detection = result.payload.detection;
-				const models = result.payload.data || [];
+				const discoveredModels = result.payload.data || [];
+				const previousModels = Array.isArray(stored?.models) ? stored.models : [];
+				const models = discoveredModels.map((model) => {
+					const routeKey = `${model.protocol || detection.protocol}:${model.id}`;
+					const saved = previousModels.find((candidate) => candidate.routeKey === routeKey) || previousModels.find((candidate) => candidate.modelName === model.id && candidate.protocol === model.protocol);
+					const manual = saved?.routeSource === "manual" || !saved?.routeSource && saved?.protocol && saved.protocol !== model.protocol;
+					return normalizeModelConfig({
+						...saved || {},
+						...model,
+						modelName: model.id,
+						name: saved?.name || model.name || model.id,
+						routeKey,
+						provider: manual ? saved.provider : model.provider,
+						protocol: manual ? saved.protocol : model.protocol,
+						authType: manual ? saved.authType : model.authType,
+						imagePath: manual ? saved.imagePath : model.imagePath,
+						editPath: manual ? saved.editPath : model.editPath,
+						supportedSizes: model.supportedSizes,
+						routeSource: manual ? "manual" : "auto"
+					}, model);
+				}).filter(Boolean);
+				const preservedManual = previousModels.filter((saved) => saved.routeSource === "manual" && !models.some((model) => model.id === saved.id));
+				const allModels = [...models, ...preservedManual];
 				const nextApis = settings.apis.map((item) => item.id === api.id ? {
 					...item,
 					provider: detection.provider,
@@ -1619,15 +2249,18 @@ http.createServer(async (req, res) => {
 						confidence: detection.confidence,
 						testedAt: detection.testedAt
 					},
-					modelRoutes: Object.fromEntries(models.map((model) => [model.id, {
-						provider: detection.provider,
-						protocol: detection.protocol,
-						authType: detection.authType,
-						imagePath: detection.imagePath,
-						editPath: detection.editPath,
-						confidence: detection.confidence,
-						testedAt: detection.testedAt
-					}]))
+					detectedProtocols: (result.payload.detections || [detection]).map((entry) => entry.protocol),
+					ambiguousModels: result.payload.ambiguousModels || [],
+					modelRoutes: Object.fromEntries(allModels.map((model) => [model.id, {
+						provider: model.provider || detection.provider,
+						protocol: model.protocol || detection.protocol,
+						authType: model.authType || detection.authType,
+						imagePath: model.imagePath || detection.imagePath,
+						editPath: model.editPath || detection.editPath,
+						confidence: model.routeSource === "manual" ? "manual" : "verified",
+						...model.supportedSizes?.length ? { supportedSizes: model.supportedSizes } : {}
+					}])),
+					models: allModels
 				} : item);
 				await write(files.settings, {
 					...settings,
@@ -1638,8 +2271,19 @@ http.createServer(async (req, res) => {
 		}
 		if (req.url === "/api/generate" && req.method === "POST") {
 			const input = await json(req);
-			const api = await activeApi();
-			const requestedImages = Array.isArray(input.images) ? input.images.filter((image) => typeof image === "string" && image.trim()) : [];
+			const requestId = crypto.randomUUID();
+			const requestedModel = String(input.model || "").trim();
+			const api = input.modelConfigId ? await apiForModel(input.model, input.modelConfigId) : await activeApi();
+			const requestedReferences = Array.isArray(input.images) ? input.images.filter((image) => typeof image === "string" && image.trim() || image && typeof image === "object" && image.assetId) : [];
+			const requestedImages = [];
+			for (const reference of requestedReferences) {
+				const resolved = await resolveReferenceImage(reference);
+				if (!resolved) return send(res, 400, {
+					error: "图片资源不存在或已失效",
+					code: "ASSET_NOT_FOUND"
+				});
+				requestedImages.push(resolved);
+			}
 			const mode = input.mode === "image" ? "image" : "text";
 			const operation = promptTemplateOperation(input.operation, mode);
 			const builtIn = (await read(files.builtInPromptTemplates, [])).find((item) => promptTemplateMatches(item, mode, operation));
@@ -1654,15 +2298,20 @@ http.createServer(async (req, res) => {
 				userTemplate?.defaultNegativePrompt && `负向提示词：${userTemplate.defaultNegativePrompt}`,
 				input.extraPrompt
 			].filter((value) => typeof value === "string" && value.trim()).join("\n\n");
-			if (!api) return send(res, 400, { error: "请先配置并启用 API" });
+			if (!api) return send(res, 400, { error: input.modelConfigId ? "未找到所选模型所属的 API 配置" : "请先配置并启用 API" });
+			const configuredModel = configuredModelFor(api, input.model, input.modelConfigId);
+			if (configuredModel) input.model = configuredModel.modelName;
 			const controller = new AbortController();
 			req.on("aborted", () => controller.abort());
 			const images = [];
 			const responses = [];
 			const debugResponses = [];
+			let responseProvider = null;
+			let finalRoute = null;
 			for (let index = 0; index < Math.max(1, Number(input.n || 1)); index += 1) {
 				if (controller.signal.aborted) break;
-				const route = detectedRoute(api, input.model);
+				const route = routeForModel(api, input.model, input.modelConfigId);
+				finalRoute = route;
 				const provider = route.provider;
 				const payload = {
 					model: input.model,
@@ -1672,22 +2321,18 @@ http.createServer(async (req, res) => {
 					response_format: "url"
 				};
 				if (input.size && input.size !== "auto") payload.size = input.size;
-				if (input.resolution) payload.resolution = input.resolution;
-				if (input.format) payload.output_format = input.format;
-				if (input.mask) payload.mask = input.mask;
 				const referenceImages = requestedImages;
-				if (Array.isArray(input.materials) && input.materials.length) payload.materials = input.materials.map(({ data, ...material }) => material);
 				const isReferenceRequest = referenceImages.length > 0;
-				const imagePath = isReferenceRequest ? route.editPath : route.imagePath;
+				const imagePath = route.protocol === "openai-chat" ? "/chat/completions" : isReferenceRequest ? route.editPath : route.imagePath;
 				let body = JSON.stringify(payload);
 				let headers = protocolHeaders(api, route);
-				if (route.protocol === "anthropic-messages") body = JSON.stringify(messagesPayload(input.model, finalPrompt, referenceImages));
+				if (route.protocol === "openai-chat") body = JSON.stringify(openaiChatImagePayload(input.model, finalPrompt, referenceImages));
+				else if (route.protocol === "anthropic-messages") body = JSON.stringify(messagesPayload(input.model, finalPrompt, referenceImages));
 				else if (isReferenceRequest && route.protocol === "openai-images") {
 					const form = new FormData();
 					appendGenerationOptions(form, payload, input);
 					for (const [imageIndex, image] of referenceImages.entries()) form.append("image[]", dataUrlFile(image), referenceFilename(image, imageIndex));
 					if (input.mask) form.append("mask", dataUrlFile(input.mask, "person-mask.png"), "person-mask.png");
-					form.append("input_fidelity", "high");
 					body = form;
 					headers = protocolHeaders(api, route, false);
 				}
@@ -1700,16 +2345,59 @@ http.createServer(async (req, res) => {
 				activeGenerations.set(activeTaskId, controller);
 				let response;
 				let result;
-				let responseProvider = provider;
+				responseProvider = provider;
+				const upstreamStartedAt = Date.now();
+				const requestLog = {
+					requestId,
+					taskId: activeTaskId,
+					createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+					requestedModel,
+					model: input.model,
+					modelDisplayName: configuredModel?.name || input.model,
+					modelConfigId: input.modelConfigId || null,
+					configuredModelId: configuredModel?.id || null,
+					apiId: api.id || null,
+					upstreamName: api.name || null,
+					provider,
+					protocol: route.protocol,
+					endpoint: safeEndpoint(provider === "gemini" ? geminiUrl(api, input.model) : apiUrl(api.endpoint, imagePath)),
+					imagePath,
+					referenceImageCount: referenceImages.length,
+					referenceImages: referenceImages.map((image) => ({
+						mimeType: dataUrlParts(image)?.mimeType || "",
+						bytes: dataUrlByteLength(image)
+					})),
+					size: input.size || null,
+					clientRequestStartedAt: new Date(upstreamStartedAt).toISOString(),
+					status: "dispatching"
+				};
+				await appendGenerationLog(requestLog);
 				try {
-					response = await fetchImageGeneration(provider === "gemini" ? geminiUrl(api, input.model) : apiUrl(api.endpoint, imagePath), {
+					if (route.protocol === "mj-proxy") {
+						result = await generateMjImage(api, input.model, finalPrompt, referenceImages, controller.signal);
+						response = {
+							ok: true,
+							status: 200,
+							statusText: "OK"
+						};
+					} else response = await fetchImageGeneration(provider === "gemini" ? geminiUrl(api, input.model) : apiUrl(api.endpoint, imagePath), {
 						method: "POST",
 						headers,
 						body,
 						signal: controller.signal
 					});
 				} catch (error) {
+					await appendGenerationLog({
+						...requestLog,
+						finishedAt: (/* @__PURE__ */ new Date()).toISOString(),
+						durationMs: Date.now() - upstreamStartedAt,
+						upstreamDurationMs: Date.now() - upstreamStartedAt,
+						status: "network-error",
+						error: error.message,
+						code: error?.cause?.code || error?.code || ""
+					});
 					return send(res, 504, {
+						requestId,
 						error: upstreamFetchError(error, "图片生成接口", input.size),
 						code: String(error?.cause?.code || error?.code || "UPSTREAM_FETCH_ERROR"),
 						original: {
@@ -1723,17 +2411,40 @@ http.createServer(async (req, res) => {
 				} finally {
 					activeGenerations.delete(activeTaskId);
 				}
+				if (response && typeof response.status === "number") await appendGenerationLog({
+					...requestLog,
+					status: "headers-received",
+					httpStatus: response.status,
+					headersDurationMs: response._phantomHeadersDurationMs || Date.now() - upstreamStartedAt
+				});
 				try {
-					result = await upstreamJson(response, `${provider} 图片接口`);
+					if (!result) result = await upstreamJson(response, `${provider} 图片接口`);
 				} catch (error) {
+					await appendGenerationLog({
+						...requestLog,
+						finishedAt: (/* @__PURE__ */ new Date()).toISOString(),
+						durationMs: Date.now() - upstreamStartedAt,
+						upstreamDurationMs: Date.now() - upstreamStartedAt,
+						headersDurationMs: response?._phantomHeadersDurationMs || null,
+						bodyDurationMs: response?._phantomHeadersDurationMs ? Math.max(0, Date.now() - upstreamStartedAt - response._phantomHeadersDurationMs) : null,
+						status: "upstream-response-error",
+						httpStatus: response.status,
+						code: error.code || "",
+						generationAcceptedUnknown: ["UPSTREAM_524", "UPSTREAM_RESPONSE_TIMEOUT"].includes(error.code),
+						error: error.message,
+						upstreamBody: error.upstreamBody || "",
+						upstream: diagnosticValue(result)
+					});
 					return send(res, response.ok ? 502 : response.status, {
+						requestId,
 						error: error.message,
 						code: error.code || "UPSTREAM_RESPONSE_ERROR",
-						generationAcceptedUnknown: error.code === "UPSTREAM_524",
+						generationAcceptedUnknown: ["UPSTREAM_524", "UPSTREAM_RESPONSE_TIMEOUT"].includes(error.code),
 						provider,
 						endpoint: safeEndpoint(provider === "gemini" ? geminiUrl(api, input.model) : apiUrl(api.endpoint, imagePath)),
+						upstreamBody: error.upstreamBody || "",
 						upstream: diagnosticValue(result),
-						hint: isReferenceRequest ? "当前请求包含参考图，请确认该平台支持图生图接口或 Gemini 图片输入。" : "请确认接口地址是 API 根地址，而不是网站首页。"
+						hint: error.code === "UPSTREAM_RESPONSE_TIMEOUT" ? "中转站已返回响应头但图片内容未完整返回；请求可能已经消费，请先核对服务商记录，不要立即重复提交。" : provider === "gemini" ? "Gemini 原生接口或中转站返回了网关错误。请稍后重试；如持续失败，再检查 Gemini 图片输入和中转站状态。" : isReferenceRequest ? "当前请求包含参考图，请确认该平台支持图生图接口。" : "请确认接口地址是 API 根地址，而不是网站首页。"
 					});
 				}
 				const errorText = JSON.stringify(result).toLowerCase();
@@ -1760,7 +2471,7 @@ http.createServer(async (req, res) => {
 						return send(res, response.ok ? 502 : response.status, {
 							error: error.message,
 							code: error.code || "UPSTREAM_RESPONSE_ERROR",
-							generationAcceptedUnknown: error.code === "UPSTREAM_524",
+							generationAcceptedUnknown: ["UPSTREAM_524", "UPSTREAM_RESPONSE_TIMEOUT"].includes(error.code),
 							provider: "gemini",
 							endpoint: safeEndpoint(geminiUrl(api, input.model)),
 							upstream: diagnosticValue(result),
@@ -1768,7 +2479,21 @@ http.createServer(async (req, res) => {
 						});
 					}
 				}
+				await appendGenerationLog({
+					...requestLog,
+					finishedAt: (/* @__PURE__ */ new Date()).toISOString(),
+					durationMs: Date.now() - upstreamStartedAt,
+					upstreamDurationMs: Date.now() - upstreamStartedAt,
+					headersDurationMs: response?._phantomHeadersDurationMs || null,
+					bodyDurationMs: response?._phantomHeadersDurationMs ? Math.max(0, Date.now() - upstreamStartedAt - response._phantomHeadersDurationMs) : null,
+					status: response.ok ? "success-response" : "upstream-error",
+					httpStatus: response.status,
+					upstreamRequestId: upstreamRequestId(result),
+					upstream: diagnosticValue(result),
+					usage: result?.usage || result?.usageMetadata || null
+				});
 				if (!response.ok) return send(res, response.status, {
+					requestId,
 					error: friendlyProviderError(result, response.status, isReferenceRequest),
 					code: `UPSTREAM_HTTP_${response.status}`,
 					status: response.status,
@@ -1777,7 +2502,7 @@ http.createServer(async (req, res) => {
 					upstream: diagnosticValue(result),
 					hint: isReferenceRequest ? "当前请求包含参考图，请确认模型支持人物替换/图生图，并检查参考图尺寸。" : `当前请求尺寸为 ${input.size || "默认尺寸"}；请确认模型支持该尺寸。`
 				});
-				const normalizedData = responseProvider === "gemini" ? geminiImages(result) : route.protocol === "anthropic-messages" ? messageImages(result) : result.data || [];
+				const normalizedData = responseProvider === "gemini" ? geminiImages(result) : ["anthropic-messages", "openai-chat"].includes(route.protocol) ? messageImages(result) : openaiImages(result);
 				if (input.debug) {
 					let maskBytes = 0;
 					if (input.mask && isReferenceRequest && route.protocol === "openai-images") try {
@@ -1795,23 +2520,45 @@ http.createServer(async (req, res) => {
 						maskAttached: Boolean(maskBytes),
 						maskBytes,
 						httpStatus: response.status,
+						upstreamDurationMs: Date.now() - upstreamStartedAt,
+						headersDurationMs: response?._phantomHeadersDurationMs || null,
+						bodyDurationMs: response?._phantomHeadersDurationMs ? Math.max(0, Date.now() - upstreamStartedAt - response._phantomHeadersDurationMs) : null,
 						responseKeys: result && typeof result === "object" ? Object.keys(result) : [],
 						normalizedImageCount: normalizedData.length,
 						candidateParts: diagnosticCandidateParts(result),
 						upstream: diagnosticValue(result)
 					});
 				}
-				if (!normalizedData.length) return send(res, 502, {
-					error: "图片接口返回成功，但响应中没有可识别的图片数据",
-					code: "UPSTREAM_NO_IMAGE_DATA",
-					provider: responseProvider,
-					endpoint: safeEndpoint(responseProvider === "gemini" ? geminiUrl(api, input.model) : apiUrl(api.endpoint, imagePath)),
-					responseKeys: result && typeof result === "object" ? Object.keys(result) : [],
-					hint: "请检查中转站是否返回 inlineData/inline_data、data[].b64_json 或图片 URL。",
-					upstream: diagnosticValue(result)
-				});
+				if (!normalizedData.length) {
+					const noImageError = "图片接口返回成功，但响应中没有可识别的图片数据";
+					await appendGenerationLog({
+						...requestLog,
+						finishedAt: (/* @__PURE__ */ new Date()).toISOString(),
+						durationMs: Date.now() - upstreamStartedAt,
+						upstreamDurationMs: Date.now() - upstreamStartedAt,
+						headersDurationMs: response?._phantomHeadersDurationMs || null,
+						bodyDurationMs: response?._phantomHeadersDurationMs ? Math.max(0, Date.now() - upstreamStartedAt - response._phantomHeadersDurationMs) : null,
+						status: "upstream-response-error",
+						httpStatus: response.status,
+						code: "UPSTREAM_NO_IMAGE_DATA",
+						error: noImageError,
+						upstreamRequestId: upstreamRequestId(result),
+						upstream: diagnosticValue(result),
+						usage: result?.usage || result?.usageMetadata || null
+					});
+					return send(res, 502, {
+						requestId,
+						error: noImageError,
+						code: "UPSTREAM_NO_IMAGE_DATA",
+						provider: responseProvider,
+						endpoint: safeEndpoint(responseProvider === "gemini" ? geminiUrl(api, input.model) : apiUrl(api.endpoint, imagePath)),
+						responseKeys: result && typeof result === "object" ? Object.keys(result) : [],
+						hint: "请检查中转站是否返回 inlineData/inline_data、data[].b64_json 或图片 URL。",
+						upstream: diagnosticValue(result)
+					});
+				}
 				responses.push({
-					usage: result.usage || null,
+					usage: result.usage || result.usageMetadata || null,
 					revisedPrompts: normalizedData.map((item) => item.revised_prompt).filter(Boolean)
 				});
 				images.push(...normalizedData);
@@ -1821,36 +2568,39 @@ http.createServer(async (req, res) => {
 				const contentType = image?.mime_type || image?.content_type || "image/png";
 				const source = normalizeImageUrl(image?.url) || (image?.b64_json ? `data:${contentType};base64,${image.b64_json}` : "");
 				if (!source) return image;
+				if (/^data:image\//i.test(source)) {
+					const localUrl = generatedUrl(`${cacheKey(source)}.${imageExtension(contentType)}`);
+					const pending = cacheImageInBackground(source);
+					pendingGeneratedImages.set(localUrl, pending);
+					pending.then(() => pendingGeneratedImages.delete(localUrl), () => pendingGeneratedImages.delete(localUrl));
+					pending.catch((error) => {
+						console.error("inline image cache failed:", error.message);
+					});
+					return {
+						...image,
+						url: source,
+						localUrl,
+						sourceUrl: source
+					};
+				}
 				cacheImageInBackground(source).catch((error) => {
 					console.error("image cache failed:", error.message);
 				});
 				return {
 					...image,
 					url: source,
+					localUrl: source,
 					sourceUrl: normalizeImageUrl(image.url) || source
 				};
 			});
-			const recordImages = await Promise.all(persistedImages.map(async (image) => ({
-				...await externalizeRecordImage(image),
-				id: crypto.randomUUID(),
-				taskId: input.taskId || null,
-				parentResultId: input.parentResultId || null,
-				version: Math.max(1, Number(input.version || 1))
-			})));
-			const responseImages = persistedImages.map((image, index) => {
-				if (!image?.b64_json || !recordImages[index]?.url) return image;
-				const value = {
-					...image,
-					url: recordImages[index].url,
-					sourceUrl: recordImages[index].url
-				};
-				delete value.b64_json;
-				return value;
-			});
-			await appendGenerationRecord({
+			const responseImages = persistedImages;
+			const record = {
 				id: Date.now().toString(),
 				createdAt: (/* @__PURE__ */ new Date()).toISOString(),
 				model: input.model,
+				modelConfigId: input.modelConfigId || null,
+				upstreamName: api.name || null,
+				protocol: responseProvider === "gemini" ? "gemini-generate-content" : finalRoute?.protocol || "openai-images",
 				prompt: input.extraPrompt || "",
 				request: {
 					taskId: input.taskId || crypto.randomUUID(),
@@ -1868,10 +2618,23 @@ http.createServer(async (req, res) => {
 					}))
 				},
 				responses,
+				images: []
+			};
+			Promise.all(persistedImages.map(async (image) => ({
+				...await externalizeRecordImage(image),
+				id: crypto.randomUUID(),
+				taskId: input.taskId || null,
+				parentResultId: input.parentResultId || null,
+				version: Math.max(1, Number(input.version || 1))
+			}))).then((recordImages) => appendGenerationRecord({
+				...record,
 				images: recordImages
+			})).catch((error) => {
+				console.error("generation record persistence failed:", error.message);
 			});
 			const payload = {
 				created: Date.now(),
+				requestId,
 				data: responseImages
 			};
 			if (input.debug) payload.debug = {

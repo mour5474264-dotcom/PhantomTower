@@ -9,6 +9,7 @@ import {
   getPromptTemplates,
   getRecords,
   generateImage,
+  uploadImageAsset,
   generatePersonMask,
   cancelGeneration,
   exportImages,
@@ -65,6 +66,7 @@ const HOME_MEMORY_STORE = 'workspace'
 const HOME_MEMORY_KEY = 'home'
 const HOME_MEMORY_VERSION = 1
 const MAX_REFERENCE_IMAGE_SIDE = 4096
+const assetUploadCache = new WeakMap()
 let restoringHomeMemory = true
 let persistHomeMemoryTimer = 0
 let configRequestId = 0
@@ -180,13 +182,20 @@ async function clearHomeMemory() {
   })
 }
 
-function fileToDataUrl(file) {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(reader.result);
-    reader.onerror = reject;
-    reader.readAsDataURL(file)
+async function fileToAssetReference(file) {
+  const cached = assetUploadCache.get(file)
+  if (cached) return cached
+  const pending = uploadImageAsset(file).then((result) => {
+    if (!result?.assetId) throw new Error('图片资源上传失败')
+    return {assetId: result.assetId, size: result.size, contentType: result.contentType}
   })
+  assetUploadCache.set(file, pending)
+  try {
+    return await pending
+  } catch (exception) {
+    assetUploadCache.delete(file)
+    throw exception
+  }
 }
 
 async function getRequestSize(task, requestConfig) {
@@ -222,6 +231,8 @@ const materialLabels = {
 }
 const results = ref([]);
 const selected = ref(new Set())
+// Allocated before mask/provider work so queued cards can be cancelled.
+const cancelledTaskIds = new Set()
 const exporting = ref(false)
 const preparingEdit = ref(false)
 const allResultsSelected = computed(() => results.value.length > 0 && selected.value.size === results.value.length)
@@ -241,7 +252,7 @@ const taskCount = computed(() => isTextMode.value ? (prompt.value.trim() || pres
 const totalExpected = computed(() => taskCount.value * Math.max(1, Number(count.value || 1)))
 const imagesPerRequest = computed(() => Object.values(materials.value).reduce((total, items) => total + items.length, 0))
 const sizeSummary = computed(() => {
-  if (selectedProtocol.value === 'gemini') return `${resolution.value} · ${aspectRatio.value}`
+  if (selectedProtocol.value === 'gemini') return `${resolution.value} · ${aspectRatio.value === 'auto' ? '自动比例' : aspectRatio.value}`
   if (size.value === 'custom') return `${customWidth.value} x ${customHeight.value}`
   return size.value
 })
@@ -276,6 +287,8 @@ const materialTypes = [
 function normalizeConfigSelection() {
   if (models.value.length && !models.value.some((item) => item.id === model.value)) model.value = models.value[0]?.id || ''
   if (!models.value.length) model.value = ''
+  const selected = models.value.find((item) => item.id === model.value)
+  if (selected?.upstreamName) activeWorkspaceName.value = selected.upstreamName
   if (!availableTemplates.value.some((item) => item.id === presetId.value)) presetId.value = ''
 }
 materialTypes.push({key: 'scene', label: '背景参考', step: '可选', hint: '用于影响每张目标图的背景与环境', limit: 30})
@@ -297,7 +310,7 @@ const activeMaterialTypes = computed(() => {
 const gptSizeOptions = [
   {label: '1K（1080x1920）', value: '1080x1920'},
   {label: '2K（2160x3240）', value: '2160x3240'},
-  {label: '4K（2160x3840，9:16）', value: '2160x3840'},
+  {label: '4K（2160x3840）', value: '2160x3840'},
   {label: '自定义尺寸', value: 'custom'}
 ]
 const geminiResolutionOptions = [
@@ -306,6 +319,7 @@ const geminiResolutionOptions = [
   {label: '4K', value: '4K'}
 ]
 const geminiAspectRatioOptions = [
+  {label: 'auto', value: 'auto'},
   {label: '1:1', value: '1:1'},
   {label: '16:9', value: '16:9'},
   {label: '9:16', value: '9:16'},
@@ -317,16 +331,44 @@ const geminiAspectRatioOptions = [
   {label: '4:5', value: '4:5'},
   {label: '21:9', value: '21:9'}
 ]
+const geminiAspectRatios = geminiAspectRatioOptions.filter((option) => option.value !== 'auto')
+
+// Gemini only accepts an allowlist of aspect ratios. Auto keeps the target
+// composition as closely as the allowlist permits; it does not change the
+// selected 1K/2K/4K output tier.
+function nearestGeminiAspectRatio(width, height) {
+  const sourceRatio = Number(width) > 0 && Number(height) > 0 ? Number(width) / Number(height) : 1
+  return geminiAspectRatios.reduce((closest, option) => {
+    const [w, h] = option.value.split(':').map(Number)
+    const distance = Math.abs(Math.log(sourceRatio / (w / h)))
+    return distance < closest.distance ? {value: option.value, distance} : closest
+  }, {value: '1:1', distance: Infinity}).value
+}
+
+async function resolveGeminiAspectRatio(value, target) {
+  if (value !== 'auto') return value
+  const file = rawFile(target)
+  if (!file) return '1:1'
+  try {
+    const dimensions = target?.width && target?.height
+      ? {width: target.width, height: target.height}
+      : await imageDimensions(file)
+    return nearestGeminiAspectRatio(dimensions.width, dimensions.height)
+  } catch {
+    return '1:1'
+  }
+}
+const selectedModel = computed(() => models.value.find((item) => item.id === model.value) || null)
 const selectedProtocol = computed(() => {
   const api = activeApiConfig.value
-  const route = api?.modelRoutes?.[model.value] || api?.detectedRoute || {}
+  const selected = selectedModel.value
+  const route = selected || api?.modelRoutes?.[model.value] || api?.detectedRoute || {}
   return String(route.provider || api?.provider || '').toLowerCase() === 'gemini'
       || String(route.protocol || '').toLowerCase() === 'gemini-generate-content'
     ? 'gemini'
     : 'openai'
 })
 const sizeOptions = computed(() => gptSizeOptions)
-const selectedModel = computed(() => models.value.find((item) => item.id === model.value) || null)
 function modelSupportsSize(value) {
   if (value === 'custom') return true
   const supported = selectedModel.value?.supportedSizes
@@ -359,7 +401,9 @@ function materialMemoryItem(item) {
     name: item.name || file.name,
     size: item.size || file.size,
     type: file.type,
-    lastModified: file.lastModified
+    lastModified: file.lastModified,
+    width: Number(item.width) || null,
+    height: Number(item.height) || null
   }
 }
 
@@ -370,6 +414,8 @@ function restoreMaterialItem(item) {
     file,
     name: item.name || file.name,
     size: item.size || file.size,
+    width: Number(item.width) || null,
+    height: Number(item.height) || null,
     previewUrl: URL.createObjectURL(file)
   })
 }
@@ -381,7 +427,11 @@ function resultMemoryItem(item) {
     loading: false,
     status: isSourcePreview ? 'stopped' : (item.url ? 'completed' : (item.loading ? 'stopped' : item.status)),
     error: item.error || '',
-    url: isSourcePreview ? '' : (item.url || ''),
+    // Keep the immediate preview in live state, but persist the compact local
+    // export URL instead of copying a potentially huge base64 data URL into
+    // IndexedDB snapshots.
+    url: isSourcePreview ? '' : (item.exportUrl || item.localUrl || item.url || ''),
+    exportUrl: isSourcePreview ? '' : (item.exportUrl || item.localUrl || item.url || ''),
     label: item.label || '样片',
     isSourcePreview,
     taskId: item.taskId || null,
@@ -432,6 +482,7 @@ async function restorePersistedResultImages() {
         error: '',
         imageLoading: Boolean(persisted.url) && !imageLoadsImmediately(persisted.url),
         url: persisted.url,
+        exportUrl: persisted.image?.localUrl || persisted.image?.url || persisted.url,
         id: persisted.image?.id || item.id,
         taskId: persisted.image?.taskId || taskId,
         parentResultId: persisted.image?.parentResultId || item.parentResultId || null,
@@ -566,7 +617,7 @@ async function buildLabeledReferences(task, materialSet = materials.value) {
         type: materialLabels[key],
         promptLabel: referencePromptLabel(key),
         primary: item === task?.item,
-        data: await fileToDataUrl(file)
+        data: await fileToAssetReference(file)
       })
     }
   }
@@ -677,8 +728,12 @@ async function addFiles(key, upload) {
   const file = rawFile(upload);
   if (!file || !file.type?.startsWith('image/')) return;
   let preparedFile = file
+  let width = 0
+  let height = 0
   try {
-    const {width, height} = await imageDimensions(file)
+    const dimensions = await imageDimensions(file)
+    width = dimensions.width
+    height = dimensions.height
     if (Math.max(width, height) > MAX_REFERENCE_IMAGE_SIDE) {
       const scale = MAX_REFERENCE_IMAGE_SIDE / Math.max(width, height)
       const resizedWidth = Math.max(1, Math.round(width * scale))
@@ -696,7 +751,7 @@ async function addFiles(key, upload) {
     return;
   }
   if (materials.value[key].some((item) => item.name === preparedFile.name && item.size === preparedFile.size)) return;
-  materials.value[key].push(markRaw({file: preparedFile, name: preparedFile.name, size: preparedFile.size, previewUrl: URL.createObjectURL(preparedFile)}))
+  materials.value[key].push(markRaw({file: preparedFile, name: preparedFile.name, size: preparedFile.size, width, height, previewUrl: URL.createObjectURL(preparedFile)}))
 }
 
 function removeFile(key, index) {
@@ -736,8 +791,12 @@ async function refresh(options = {}) {
     if (requestId !== configRequestId) return
     if (modelsResult.status === 'fulfilled') {
       models.value = modelsResult.value || []
-      const preferredModel = activeApi?.model && models.value.some((item) => item.id === activeApi.model) ? activeApi.model : ''
+      const preferredModel = settings?.activeModelId && models.value.some((item) => item.id === settings.activeModelId)
+        ? settings.activeModelId
+        : (activeApi?.model && models.value.some((item) => item.modelName === activeApi.model) ? models.value.find((item) => item.modelName === activeApi.model)?.id : '')
       model.value = preferredModel || (models.value.some((item) => item.id === model.value) ? model.value : models.value[0]?.id || '')
+      const selected = models.value.find((item) => item.id === model.value)
+      if (selected?.upstreamId) activeApiConfig.value = settings?.apis?.find((item) => item.id === selected.upstreamId) || activeApiConfig.value
       if (!models.value.length) {
         modelLoadError.value = '当前工作台没有返回模型列表'
         showMessage('warning', modelLoadError.value)
@@ -953,7 +1012,9 @@ function createGenerationWork() {
   error.value = '';
   const tasks = buildTasks()
   const requestConfig = {
-    model: model.value,
+    model: selectedModel.value?.modelName || model.value,
+    modelConfigId: selectedModel.value?.id || '',
+    modelLabel: selectedModel.value?.upstreamName ? `${selectedModel.value.upstreamName} / ${selectedModel.value.name}` : model.value,
     protocol: selectedProtocol.value,
     prompt: prompt.value,
     presetId: presetId.value || null,
@@ -971,7 +1032,7 @@ function createGenerationWork() {
     Object.entries(materials.value).map(([key, items]) => [key, [...items]])
   )
   const jobs = tasks.flatMap((task) =>
-      Array.from({length: count.value}, (_, copyIndex) => ({task, copyIndex}))
+      Array.from({length: count.value}, (_, copyIndex) => ({task, copyIndex, taskId: crypto.randomUUID()}))
   );
   if (!running.value) {
     completedCount.value = 0
@@ -979,12 +1040,13 @@ function createGenerationWork() {
   }
   generationTotal.value += jobs.length
   const resultStart = results.value.length
-  results.value.push(...jobs.map(({task}, index) => ({
+  results.value.push(...jobs.map(({task, taskId}, index) => ({
     id: `result-${Date.now()}-${resultStart + index}`,
     loading: true,
-    status: 'generating',
+    status: 'preparing',
     label: task.label,
-    task
+    task,
+    taskId
   })));
   return {tasks, jobs, resultStart, requestConfig, materialSnapshot, copies: Number(count.value)}
 }
@@ -1023,7 +1085,10 @@ async function runGeneration(work) {
         labeled,
         mask,
         maskStatus: task.type === 'reference' && isGeminiRequest ? 'skipped-gemini' : maskStatus,
-        requestSize: await getRequestSize(task, work.requestConfig)
+        requestSize: await getRequestSize(task, work.requestConfig),
+        aspectRatio: isGeminiRequest
+          ? await resolveGeminiAspectRatio(work.requestConfig.aspectRatio, task.item)
+          : ''
       }
     }))
     if (workController.signal.aborted) throw new DOMException('Aborted', 'AbortError')
@@ -1032,21 +1097,33 @@ async function runGeneration(work) {
     // Keep a small number of provider requests in flight. Launching every
     // target at once exceeds browser/relay connection limits; queued requests
     // then appear in DevTools without a payload and leave cards pending.
+    // Keep Gemini parallel, while limiting pressure on relays that queue long
+    // image responses. Each job has its own controller and result slot, so one
+    // stalled/billed request cannot block the other images.
     const concurrency = work.requestConfig.protocol === 'gemini' ? 3 : 4
     let nextJobIndex = 0
-    const runJob = async ({task}, jobIndex) => {
+    const runJob = async ({task, taskId: allocatedTaskId}, jobIndex) => {
       const prepared = preparedByTask.get(task)
       const {labeled} = prepared
       const resultIndex = work.resultStart + jobIndex
+      const taskId = allocatedTaskId || results.value[resultIndex]?.taskId || crypto.randomUUID()
       const resultId = results.value[resultIndex]?.id
       const currentResultIndex = () => results.value.findIndex((item) => item?.id === resultId)
-      const taskId = crypto.randomUUID()
+      if (cancelledTaskIds.has(taskId)) {
+        const skippedIndex = currentResultIndex()
+        if (skippedIndex >= 0 && results.value[skippedIndex]?.loading) {
+          results.value[skippedIndex] = {...results.value[skippedIndex], loading: false, status: 'stopped', error: ''}
+        }
+        completedCount.value += 1
+        return
+      }
       const controller = new AbortController()
       generationControllers.set(taskId, controller)
       const abortHandler = () => controller.abort()
       workController.signal.addEventListener('abort', abortHandler, {once: true})
       const requestSnapshot = {
           model: work.requestConfig.model,
+          modelConfigId: work.requestConfig.modelConfigId,
           protocol: work.requestConfig.protocol,
           prompt: buildMaterialPrompt(labeled, task.type, task.label, work.requestConfig.replaceObject, selectedTemplate?.systemPrompt || ''),
           extraPrompt: work.requestConfig.prompt,
@@ -1059,7 +1136,7 @@ async function runGeneration(work) {
           quality: work.requestConfig.quality,
           format: work.requestConfig.format,
           resolution: work.requestConfig.resolution,
-          aspectRatio: work.requestConfig.aspectRatio,
+          aspectRatio: prepared.aspectRatio || work.requestConfig.aspectRatio,
           mask: prepared.mask,
           maskStatus: prepared.maskStatus,
           taskId,
@@ -1086,6 +1163,7 @@ async function runGeneration(work) {
           loading: false,
           imageLoading: Boolean(imageUrl) && !imageLoadsImmediately(imageUrl),
           url: imageUrl,
+          exportUrl: output?.localUrl || output?.local_url || imageUrl,
           label: task.label,
           task,
           id: output?.id || results.value[finishedIndex]?.id,
@@ -1139,7 +1217,8 @@ async function generate() {
 }
 
 async function stop() {
-  const taskIds = [...generationControllers.keys()]
+  const taskIds = [...new Set(results.value.filter((item) => item?.loading && item.taskId).map((item) => item.taskId))]
+  taskIds.forEach((taskId) => cancelledTaskIds.add(taskId))
   activeGenerationWorks.forEach((work) => work.controller?.abort())
   generationControllers.forEach((controller) => controller.abort())
   generationControllers.clear()
@@ -1157,6 +1236,7 @@ async function stopOne(index) {
   const item = results.value[index]
   const taskId = item?.taskId || item?.requestSnapshot?.taskId
   if (!item?.loading || !taskId) return
+  cancelledTaskIds.add(taskId)
   generationControllers.get(taskId)?.abort()
   generationControllers.delete(taskId)
   results.value[index] = {
@@ -1277,6 +1357,7 @@ async function retry(index) {
   if (!item?.requestSnapshot || item.loading) return
   if (selected.value.has(index)) toggle(index)
   const taskId = crypto.randomUUID()
+  cancelledTaskIds.delete(taskId)
   const controller = new AbortController()
   const requestSnapshot = {...item.requestSnapshot, taskId}
   requestSnapshot.debug = true
@@ -1306,6 +1387,7 @@ async function retry(index) {
       error: imageUrl ? '' : '接口没有返回可预览的图片',
       imageLoading: Boolean(imageUrl) && !imageLoadsImmediately(imageUrl),
       url: imageUrl,
+      exportUrl: output?.localUrl || output?.local_url || imageUrl,
       id: output?.id || item.id,
       taskId: output?.taskId || taskId,
       parentResultId: output?.parentResultId || null,
@@ -1326,7 +1408,10 @@ async function retry(index) {
 }
 
 async function exportSelected() {
-  const urls = [...selected.value].sort((a, b) => a - b).map((index) => results.value[index]?.url).filter(Boolean)
+  const urls = [...selected.value].sort((a, b) => a - b).map((index) => {
+    const item = results.value[index]
+    return item?.exportUrl || item?.localUrl || item?.url
+  }).filter(Boolean)
   if (!urls.length || exporting.value) return
   exporting.value = true
   error.value = ''
@@ -1538,8 +1623,8 @@ onBeforeUnmount(() => {
             <div class="quick-controls" aria-label="常用生成设置">
               <el-form-item class="quick-control quick-model" label="模型">
                 <el-select v-model="model" class="studio-select" filterable allow-create default-first-option :placeholder="configLoading ? '正在加载模型...' : '选择模型，可直接输入模型 ID'" popper-class="studio-select-popper" clearable :loading="configLoading">
-                  <el-option v-for="(item, index) in models" :key="item.id" :label="item.id" :value="item.id">
-                    <div class="select-option"><span class="select-index">{{ String(index + 1).padStart(2, '0') }}</span><span><b>{{ item.id }}</b><small>{{ item.supportedSizes?.length ? `支持 ${item.supportedSizes.join('、')}` : (index === 0 ? '主力生成模型' : '备用生成模型') }}</small></span></div>
+                  <el-option v-for="(item, index) in models" :key="item.id" :label="item.upstreamName ? ` ${item.name || item.modelName}` : (item.name || item.modelName || item.id)" :value="item.id">
+                    <div class="select-option"><span class="select-index">{{ String(index + 1).padStart(2, '0') }}</span><span><b>{{ item.upstreamName ? ` ${item.name || item.modelName}` : (item.name || item.modelName || item.id) }}</b><small>{{ item.modelName && item.modelName !== item.name ? item.modelName : (item.supportedSizes?.length ? `支持 ${item.supportedSizes.join('、')}` : (index === 0 ? '主力生成模型' : '备用生成模型')) }}</small></span></div>
                   </el-option>
                 </el-select>
               </el-form-item>
@@ -1636,7 +1721,7 @@ onBeforeUnmount(() => {
         <div v-for="(item,index) in results" :key="item.id || index" class="result-card"
              :class="{ selected: selected.has(index) }">
           <div v-if="item.loading && !item.url" class="loading-placeholder">
-            <span>{{ item.status === 'generating' ? '正在加载图片...' : '等待生成' }}</span>
+            <span>{{ item.status === 'preparing' ? '正在准备素材...' : item.status === 'generating' ? '正在加载图片...' : '等待生成' }}</span>
             <b>样片 {{ index + 1 }}</b>
 
             <el-button v-if="item.taskId" size="small" :icon="SwitchButton" @click="stopOne(index)">停止</el-button>

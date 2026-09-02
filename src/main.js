@@ -4,6 +4,7 @@ import {
   ElButton,
   ElCheckbox,
   ElDialog,
+  ElDatePicker,
   ElEmpty,
   ElForm,
   ElFormItem,
@@ -12,6 +13,7 @@ import {
   ElInput,
   ElInputNumber,
   ElOption,
+  ElPagination,
   ElRadioButton,
   ElRadioGroup,
   ElSelect,
@@ -26,6 +28,7 @@ import 'element-plus/es/components/alert/style/css'
 import 'element-plus/es/components/button/style/css'
 import 'element-plus/es/components/checkbox/style/css'
 import 'element-plus/es/components/dialog/style/css'
+import 'element-plus/es/components/date-picker/style/css'
 import 'element-plus/es/components/empty/style/css'
 import 'element-plus/es/components/form/style/css'
 import 'element-plus/es/components/form-item/style/css'
@@ -34,6 +37,7 @@ import 'element-plus/es/components/image/style/css'
 import 'element-plus/es/components/input/style/css'
 import 'element-plus/es/components/input-number/style/css'
 import 'element-plus/es/components/option/style/css'
+import 'element-plus/es/components/pagination/style/css'
 import 'element-plus/es/components/radio-button/style/css'
 import 'element-plus/es/components/radio-group/style/css'
 import 'element-plus/es/components/select/style/css'
@@ -83,7 +87,7 @@ const router=createRouter({history:createWebHashHistory(),routes:[{path:'/',comp
 const app = createApp(App).use(createPinia()).use(router)
 const elementComponents = {
   ElAlert, ElButton, ElCheckbox, ElDialog, ElEmpty, ElForm, ElFormItem,
-  ElIcon, ElImage, ElInput, ElInputNumber, ElOption, ElRadioButton,
+  ElIcon, ElImage, ElInput, ElInputNumber, ElOption, ElPagination, ElDatePicker, ElRadioButton,
   ElRadioGroup, ElSelect, ElSwitch, ElTabPane, ElTable, ElTableColumn,
   ElTabs, ElUpload
 }

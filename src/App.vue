@@ -2,7 +2,11 @@
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { RouterLink, RouterView } from 'vue-router'
 import { Images, Settings2, Server, History, SlidersHorizontal, ChevronDown } from 'lucide-vue-next'
+import { ElConfigProvider } from 'element-plus'
+import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import { getSettings, saveSettings, notifyActiveApiChanged } from './api'
+
+const locale = zhCn
 
 const apiProfiles = ref([])
 const activeApiId = ref('')
@@ -103,6 +107,7 @@ onUnmounted(() => {
 </script>
 
 <template>
+  <el-config-provider :locale="locale">
   <section v-if="!isAuthorized" class="license-gate">
     <div class="license-panel">
       <div class="brand"><span class="mark">S</span><div><b>样片工厂</b><small>Sample Factory</small></div></div>
@@ -146,6 +151,7 @@ onUnmounted(() => {
       </KeepAlive>
     </RouterView>
   </main>
+  </el-config-provider>
 </template>
 
 <style scoped>

@@ -1,8 +1,8 @@
 <script setup>
 import {ref, onMounted, onBeforeUnmount} from 'vue'
 import {useRouter} from 'vue-router'
-import {Download, Maximize2, RefreshCw, Trash2, X} from 'lucide-vue-next'
-import {deleteAllRecords, deleteRecord, getRecords, downloadImage, exportImages, makeImageFilename, formatApiError, normalizeImageUrl} from '../api'
+import {Download, Maximize2, Search, Trash2, X} from 'lucide-vue-next'
+import {deleteAllRecords, deleteRecord, getRecordPage, downloadImage, exportImages, makeImageFilename, formatApiError, normalizeImageUrl} from '../api'
 import {ElMessage, ElMessageBox} from 'element-plus'
 
 const records = ref([]);
@@ -13,6 +13,10 @@ const savingImage = ref('')
 const deletingRecord = ref('')
 const deletingAll = ref(false)
 const loadingRecords = ref(false)
+const page = ref(1)
+const pageSize = 10
+const total = ref(0)
+const timeRange = ref([])
 const router = useRouter()
 
 function formatRecordTime(value) {
@@ -75,7 +79,11 @@ async function removeRecord(record) {
     })
     deletingRecord.value = record.id
     await deleteRecord(record.id)
-    records.value = records.value.filter((item) => item.id !== record.id)
+    total.value = Math.max(0, total.value - 1)
+    const lastPage = Math.max(1, Math.ceil(total.value / pageSize))
+    if (page.value > lastPage) page.value = lastPage
+    deletingRecord.value = ''
+    await loadRecords({notify: false})
     ElMessage.success('生成记录已删除')
   } catch (e) {
     if (e !== 'cancel' && e !== 'close') ElMessage.error(formatApiError(e, '生成记录删除失败，请稍后重试'))
@@ -95,6 +103,7 @@ async function removeAllRecords() {
     deletingAll.value = true
     const result = await deleteAllRecords()
     records.value = []
+    total.value = 0
     ElMessage.success(result?.count ? `已删除 ${result.count} 条生成记录` : '暂无生成记录可删除')
   } catch (e) {
     if (e !== 'cancel' && e !== 'close') ElMessage.error(formatApiError(e, '生成记录删除失败，请稍后重试'))
@@ -103,19 +112,45 @@ async function removeAllRecords() {
   }
 }
 
-async function refreshRecords({notify = true} = {}) {
+function queryTime(value, endOfMinute = false) {
+  if (!value) return ''
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+  if (endOfMinute) date.setSeconds(59, 999)
+  return date.toISOString()
+}
+
+async function loadRecords({notify = false} = {}) {
   if (loadingRecords.value || deletingAll.value || deletingRecord.value || exportingRecord.value) return
   loadingRecords.value = true
   error.value = ''
   try {
-    records.value = await getRecords()
-    if (notify) ElMessage.success('生成记录已刷新')
+    const range = Array.isArray(timeRange.value) ? timeRange.value : []
+    const result = await getRecordPage({
+      page: page.value,
+      pageSize,
+      startTime: queryTime(range[0]),
+      endTime: queryTime(range[1], true)
+    })
+    records.value = Array.isArray(result?.data) ? result.data : []
+    total.value = Number(result?.total || 0)
+    if (notify) ElMessage.success('生成记录搜索完成')
   } catch (e) {
     error.value = formatApiError(e, '生成记录读取失败')
     if (notify) ElMessage.error(error.value)
   } finally {
     loadingRecords.value = false
   }
+}
+
+async function searchRecords() {
+  page.value = 1
+  await loadRecords({notify: true})
+}
+
+async function changePage(value) {
+  page.value = value
+  await loadRecords()
 }
 
 function closePreview() {
@@ -133,7 +168,7 @@ function continueEdit(image, record) {
 
 onMounted(async () => {
   window.addEventListener('keydown', onPreviewKeydown)
-  await refreshRecords({notify: false})
+  await loadRecords()
 })
 onBeforeUnmount(() => window.removeEventListener('keydown', onPreviewKeydown))
 </script>
@@ -146,15 +181,20 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onPreviewKeydown))
         <p class="muted">按时间查看已生成的图片。</p>
       </div>
       <div class="history-heading-actions">
-        <button type="button" class="secondary history-refresh" title="刷新生成记录" aria-label="刷新生成记录" :disabled="loadingRecords || deletingAll || Boolean(deletingRecord) || Boolean(exportingRecord)" @click="refreshRecords">
-          <RefreshCw :size="14" :class="{'is-spinning': loadingRecords}"/>
-          {{ loadingRecords ? '正在刷新' : '刷新' }}
-        </button>
+        <div class="history-search" role="search">
+          <el-date-picker v-model="timeRange" type="datetimerange" range-separator="至" start-placeholder="开始时间" end-placeholder="结束时间" value-format="YYYY-MM-DDTHH:mm:ss" format="YYYY-MM-DD HH:mm" clearable aria-label="生成记录时间范围" @keyup.enter="searchRecords" />
+          <el-button type="primary" :icon="Search" class="history-search-button" title="按时间搜索生成记录" aria-label="按时间搜索生成记录" :loading="loadingRecords" :disabled="deletingAll || Boolean(deletingRecord) || Boolean(exportingRecord)" @click="searchRecords">
+            {{ loadingRecords ? '搜索中' : '搜索' }}
+          </el-button>
+        </div>
         <button type="button" class="secondary history-clear" title="删除全部生成记录" aria-label="删除全部生成记录" :disabled="!records.length || deletingAll || Boolean(deletingRecord) || Boolean(exportingRecord) || loadingRecords" @click="removeAllRecords">
           <Trash2 :size="14"/>
           {{ deletingAll ? '正在删除' : '删除全部' }}
         </button>
       </div>
+    </div>
+    <div v-if="total" class="history-pagination">
+      <el-pagination background layout="total, prev, pager, next" :current-page="page" :page-size="pageSize" :total="total" :disabled="loadingRecords" @current-change="changePage" />
     </div>
     <div class="history-scroll">
        <p v-if="error" class="form-status error" role="alert">{{ error }}</p>

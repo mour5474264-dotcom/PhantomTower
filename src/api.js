@@ -22,6 +22,7 @@ export function formatApiError(error, fallback = '操作失败') {
         if (!lines.some((line) => line.includes(text))) lines.push(`${label}：${text}`)
     }
     add('错误码', details.code || error.code)
+    add('本地请求 ID', details.requestId)
     add('HTTP', details.status || error.status)
     add('请求路径', details.path)
     add('服务端状态', details.health === 'online' ? '在线' : details.health)
@@ -32,6 +33,7 @@ export function formatApiError(error, fallback = '操作失败') {
     add('上游服务商', details.provider)
     add('上游地址', details.endpoint)
     add('服务端建议', details.hint)
+    add('中转站原始响应片段', details.upstreamBody)
     add('上游原始响应', typeof details.upstream === 'string' ? details.upstream : details.bodyPreview)
     return lines.join('\n')
 }
@@ -129,7 +131,12 @@ export async function testApiConnection(api) {
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(api)
     }, '连接测试失败')
-    return {models: data.data || data.models || [], detection: data.detection || null}
+    return {
+        models: data.data || data.models || [],
+        detection: data.detection || null,
+        detections: data.detections || [],
+        ambiguousModels: data.ambiguousModels || []
+    }
 }
 
 export async function generateImage(input, options = {}) {
@@ -196,6 +203,45 @@ export async function getPromptTemplateHistory(templateId) {
 
 export async function getRecords() {
     return request('/api/records', undefined, '生成记录读取失败')
+}
+
+export async function uploadImageAsset(file, options = {}) {
+    const form = new FormData()
+    form.append('file', file, file.name || 'reference-image')
+    return request('/api/assets/upload', {
+        method: 'POST',
+        body: form,
+        signal: options.signal
+    }, '图片上传失败')
+}
+
+export async function getRecordPage({page = 1, pageSize = 10, startTime = '', endTime = ''} = {}) {
+    const params = new URLSearchParams({page: String(page), pageSize: String(pageSize)})
+    if (startTime) params.set('startTime', startTime)
+    if (endTime) params.set('endTime', endTime)
+    return request(`/api/records?${params.toString()}`, {cache: 'no-store'}, '生成记录读取失败')
+}
+
+export async function getGenerationLogs() {
+    const data = await request('/api/generation-logs', {cache: 'no-store'}, '生成调用日志读取失败')
+    return data.data || []
+}
+
+export async function getGenerationLogsPage(params = {}) {
+    const query = new URLSearchParams()
+    Object.entries(params).forEach(([key, value]) => {
+        if (value !== undefined && value !== null && value !== '') query.set(key, String(value))
+    })
+    const suffix = query.toString() ? `?${query.toString()}` : ''
+    return request(`/api/generation-logs${suffix}`, {cache: 'no-store'}, '生成调用日志读取失败')
+}
+
+export async function deleteAllGenerationLogs(params = {}) {
+    const query = new URLSearchParams()
+    if (params.apiId) query.set('apiId', params.apiId)
+    if (params.upstreamName) query.set('upstreamName', params.upstreamName)
+    const suffix = query.toString() ? `?${query.toString()}` : ''
+    return request(`/api/generation-logs${suffix}`, {method: 'DELETE'}, '调用日志删除失败')
 }
 
 export async function deleteRecord(id) {
