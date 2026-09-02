@@ -31,7 +31,6 @@
     "electronDownload": {
       "mirror": "https://npmmirror.com/mirrors/electron/"
     },
-    "electronDist": "C:\\electron-local\\electron-v43.3.0-win32-x64",
     "files": [
       "web-dist/**/*",
       "electron/**/*",
