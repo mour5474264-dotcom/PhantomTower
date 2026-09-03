@@ -8,7 +8,7 @@ const activeTab = ref('user')
 const templates = ref([])
 const dialog = ref(false)
 const editingId = ref('')
-const form = ref({name: '', systemPrompt: '', defaultNegativePrompt: ''})
+const form = ref({name: '', systemPrompt: '', defaultNegativePrompt: '', variant: ''})
 const formRef = ref()
 const requiredRule = (message) => ({
   required: true,
@@ -24,7 +24,7 @@ const formRules = computed(() => ({
 const isBuiltIn = computed(() => activeTab.value === 'builtin')
 const title = computed(() => isBuiltIn.value ? '内置提示词预设' : '提示词预设')
 const description = computed(() => isBuiltIn.value
-  ? '内置预设会根据创作台当前功能自动生效，不会在创作台显示。'
+  ? '内置预设会根据创作台当前功能和人物模式自动匹配，不会作为普通预设显示。'
   : '保存可重复使用的创作提示词；创作台的所有模式均可按需选择。')
 
 async function loadTemplates() {
@@ -42,19 +42,19 @@ function changeTab(tab) {
 
 function openCreate() {
   editingId.value = ''
-  form.value = {name: '', systemPrompt: '', defaultNegativePrompt: ''}
+  form.value = {name: '', systemPrompt: '', defaultNegativePrompt: '', variant: ''}
   dialog.value = true
 }
 
 function edit(item) {
   editingId.value = item.id
-  form.value = {name: item.name, systemPrompt: item.systemPrompt, defaultNegativePrompt: item.defaultNegativePrompt || ''}
+  form.value = {name: item.name, systemPrompt: item.systemPrompt, defaultNegativePrompt: item.defaultNegativePrompt || '', variant: item.variant || ''}
   dialog.value = true
 }
 
 function copyTemplate(item) {
   editingId.value = ''
-  form.value = {name: `${item.name} 副本`, systemPrompt: item.systemPrompt, defaultNegativePrompt: item.defaultNegativePrompt || ''}
+  form.value = {name: `${item.name} 副本`, systemPrompt: item.systemPrompt, defaultNegativePrompt: item.defaultNegativePrompt || '', variant: item.variant || ''}
   dialog.value = true
 }
 
@@ -64,7 +64,7 @@ async function save() {
   const next = templates.value.map((item) => ({...item}))
   const existingTemplate = next.find((item) => item.id === editingId.value)
   const template = isBuiltIn.value
-    ? {...form.value, mode: existingTemplate?.mode || 'text', operation: existingTemplate?.operation || 'text'}
+    ? {...form.value, mode: existingTemplate?.mode || 'image', operation: existingTemplate?.operation || 'batch', variant: form.value.variant || ''}
     : {...form.value, mode: 'all', operation: 'all'}
   if (editingId.value) Object.assign(existingTemplate, template)
   else next.push({id: crypto.randomUUID(), ...template})
@@ -124,6 +124,9 @@ onMounted(async () => {
       <el-table v-if="templates.length" :data="templates" stripe>
         <el-table-column type="index" label="#" width="64"/>
         <el-table-column prop="name" label="预设名称" min-width="180"/>
+        <el-table-column v-if="isBuiltIn" label="人物模式" width="120">
+          <template #default="{ row }">{{ row.variant === 'single' ? '单人替换' : row.variant === 'double' ? '双人替换' : '通用' }}</template>
+        </el-table-column>
         <el-table-column prop="systemPrompt" label="提示词内容" min-width="330" show-overflow-tooltip/>
         <el-table-column label="操作" width="190" fixed="right">
           <template #default="{ row }">
@@ -139,6 +142,13 @@ onMounted(async () => {
       <el-form ref="formRef" :model="form" :rules="formRules" label-position="top">
         <el-form-item label="预设名称" prop="name" required><el-input v-model="form.name"/></el-form-item>
         <el-form-item :label="isBuiltIn ? '内置提示词' : '提示词内容'" prop="systemPrompt" required><el-input v-model="form.systemPrompt" type="textarea" :rows="6"/></el-form-item>
+        <el-form-item v-if="isBuiltIn" label="人物模式">
+          <el-select v-model="form.variant" placeholder="选择适用模式" clearable>
+            <el-option label="通用" value="" />
+            <el-option label="单人替换" value="single" />
+            <el-option label="双人替换" value="double" />
+          </el-select>
+        </el-form-item>
         <el-form-item label="默认负向提示词（可选）"><el-input v-model="form.defaultNegativePrompt" type="textarea" :rows="3"/></el-form-item>
       </el-form>
       <template #footer><el-button @click="dialog = false">取消</el-button><el-button type="primary" @click="save">保存</el-button></template>

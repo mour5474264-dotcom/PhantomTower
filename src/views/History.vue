@@ -202,6 +202,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onPreviewKeydown))
       <div v-for="record in records" :key="record.id" class="record-card">
         <div class="record-meta">
           <div><b>生成时间</b><span>{{ formatRecordTime(record.createdAt) }}</span></div>
+          <div v-if="record.request?.builtinVariant"><b>人物模式</b><span>{{ record.request.builtinVariant === 'single' ? '单人替换' : '双人替换' }}</span></div>
           <div class="record-meta-actions">
             <button class="secondary" :disabled="deletingAll || exportingRecord === record.id || deletingRecord === record.id" @click="downloadAll(record)">
               <Download :size="14"/>

@@ -1,5 +1,8 @@
 const { contextBridge, ipcRenderer } = require('electron')
 const licenseConfig = require('./license-config.cjs')
+contextBridge.exposeInMainWorld('phantomTowerServer', {
+  getToken: () => ipcRenderer.invoke('server:get-token')
+})
 
 contextBridge.exposeInMainWorld('phantomTowerLicense', {
   getStatus: () => ipcRenderer.invoke('license:get-status'),

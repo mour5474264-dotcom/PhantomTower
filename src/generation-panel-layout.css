@@ -19,6 +19,9 @@
 .v5-home-layout .image-operation-options .el-radio-button__inner { min-height: 34px; padding: 7px 5px; border: 1px solid #c8d3ce !important; border-radius: 3px !important; color: #465751; font-size: 11px; line-height: 1.25; white-space: normal; box-shadow: none !important; }
 .v5-home-layout .image-operation-options .el-radio-button.is-active .el-radio-button__inner { border-color: #258d81 !important; background: #258d81; color: #fff; }
 .v5-home-layout .operation-hint { margin: 1px 0 10px; padding: 8px 9px; border-left: 2px solid #70bdb3; background: #e8f3f0; color: #50635c; font-size: 10px; line-height: 1.5; }
+.v5-home-layout .person-variant-control { margin-bottom: 12px; }
+.v5-home-layout .person-variant-control .el-form-item__content { display: block; }
+.v5-home-layout .person-variant-control .control-hint { display: block; margin-top: 6px; color: #71807a; font-size: 10px; line-height: 1.45; }
 @media (max-width: 700px) {
   .v5-home-layout .grid > .panel:first-child { min-width: 0; padding: 16px; }
   .v5-home-layout .text-prompt .el-textarea__inner { min-height: 140px !important; }

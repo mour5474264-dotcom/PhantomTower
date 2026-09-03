@@ -87,6 +87,13 @@ function logDetail(log) {
   return log.requestId || '-'
 }
 
+function connectionErrorMessage(error) {
+  if (error?.code === 'UPSTREAM_CONNECTION_FAILED' || error?.details?.code === 'UPSTREAM_CONNECTION_FAILED') {
+    return error.message || '中转站连接失败，请检查地址、协议和 API Key。'
+  }
+  return formatApiError(error, '连接测试失败')
+}
+
 function logCost(log) {
   const values = [log?.cost, log?.price, log?.usage?.cost, log?.usage?.total_cost, log?.usage?.totalCost, log?.usageMetadata?.cost]
   const value = values.find((item) => item !== undefined && item !== null && item !== '')
@@ -213,6 +220,17 @@ function protocolForProvider(provider) {
 
 function applyProviderToModels(provider) {
   const protocol = protocolForProvider(provider)
+  // A provider switch changes the meaning of the model list. Do not rewrite
+  // the previous protocol's models into the new protocol; they belong to the
+  // endpoint discovery result for the old connection mode.
+  if (form.value.models.some((model) => model.protocol && model.protocol !== protocol)) {
+    form.value.models = []
+    form.value.detectedRoute = undefined
+    form.value.detectedProtocols = []
+    form.value.ambiguousModels = []
+    detectedProtocols.value = []
+    ambiguousModels.value = []
+  }
   const route = form.value.detectedRoute || {}
   form.value.models = form.value.models.map((model) => ({
     ...model,
@@ -340,7 +358,7 @@ async function test(item) {
     notifyActiveApiChanged(activeId.value)
     window.dispatchEvent(new CustomEvent('sample-factory-settings-changed'))
   } catch (e) {
-    ElMessage.error(`连接失败：\n${formatApiError(e, '连接测试失败')}`)
+    ElMessage.error(`连接失败：${connectionErrorMessage(e)}`)
   } finally {
     testingId.value = ''
   }
@@ -442,8 +460,14 @@ onMounted(async () => {
         <pre>{{ logDetail(selectedLog) }}</pre>
         <div class="detail-grid">
           <span>请求 ID</span><b>{{ selectedLog.requestId || '-' }}</b>
+          <span>错误码</span><b>{{ selectedLog.code || (selectedLog.httpStatus ? `UPSTREAM_HTTP_${selectedLog.httpStatus}` : '-') }}</b>
+          <span>HTTP 状态</span><b>{{ selectedLog.httpStatus || '-' }}</b>
+          <span>上游请求 ID</span><b>{{ selectedLog.upstreamRequestId || '-' }}</b>
+          <span>服务商 / 协议</span><b>{{ [selectedLog.upstreamName || selectedLog.provider, selectedLog.protocol].filter(Boolean).join(' · ') || '-' }}</b>
           <span>接口地址</span><b>{{ selectedLog.endpoint || '-' }}</b>
           <span>耗时</span><b>{{ selectedLog.durationMs ? `${(selectedLog.durationMs / 1000).toFixed(1)} 秒` : '-' }}</b>
+          <span>响应阶段</span><b>{{ selectedLog.headersDurationMs ? `响应头 ${(selectedLog.headersDurationMs / 1000).toFixed(1)} 秒 · 内容 ${selectedLog.bodyDurationMs ? `${(selectedLog.bodyDurationMs / 1000).toFixed(1)} 秒` : '未完成'}` : '-' }}</b>
+          <span>受理状态</span><b>{{ selectedLog.generationAcceptedUnknown ? '可能已受理，需核对中转站记录' : '已确认' }}</b>
           <span>费用</span><b>{{ logCost(selectedLog) }}</b>
         </div>
       </div>
@@ -470,7 +494,7 @@ onMounted(async () => {
         <div class="advanced-toggle"><span>高级路由</span><el-switch v-model="advancedRoutes" /></div>
         <div v-if="advancedRoutes" class="advanced-routes-panel">
           <div class="route-mode-bar">
-            <div><strong>自动配置模型</strong><p>测试连接后会自动读取可用模型和连接方式。</p></div>
+            <div><strong>自动配置模型</strong><p>测试连接后会保留接口返回的全部模型；如需使用图片生成，请为对应模型确认正确的图片协议和路由。</p></div>
           </div>
           <div class="model-quick-row">
             <el-select v-model="modelDraft.modelName" filterable allow-create default-first-option clearable placeholder="选择或输入模型 ID（可选）">

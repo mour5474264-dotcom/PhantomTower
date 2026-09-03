@@ -1,4 +1,16 @@
 const BASE = 'http://127.0.0.1:4317'
+const SERVER_TOKEN_PROMISE = globalThis.phantomTowerServer?.getToken
+    ? globalThis.phantomTowerServer.getToken().catch(() => '')
+    : Promise.resolve('')
+
+async function requestOptions(options = {}) {
+    const next = {...options}
+    const headers = new Headers(next.headers || {})
+    const serverToken = await SERVER_TOKEN_PROMISE
+    if (serverToken) headers.set('Authorization', `Bearer ${serverToken}`)
+    next.headers = headers
+    return next
+}
 
 // Providers occasionally return an image URL wrapped as a Markdown link,
 // e.g. `[https://example.com/image.png](https://example.com/image.png)`.
@@ -70,7 +82,7 @@ async function transportError(path, original) {
 async function request(path, options, fallback) {
     let response
     try {
-        response = await fetch(`${BASE}${path}`, options)
+        response = await fetch(`${BASE}${path}`, await requestOptions(options))
     } catch (error) {
         if (error?.name === 'AbortError') throw error
         throw await transportError(path, error)
@@ -280,7 +292,7 @@ export async function prepareEditImage(url) {
 }
 
 export async function downloadImage(url, filename = 'atelier-image.png') {
-    const response = await fetch(`${BASE}/api/save-image`, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({url, filename})})
+    const response = await fetch(`${BASE}/api/save-image`, await requestOptions({method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({url, filename})}))
     const data = await response.json().catch(() => ({}))
     if (!response.ok) throw new Error(data.error || 'image save failed')
     return data

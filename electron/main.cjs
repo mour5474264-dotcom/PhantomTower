@@ -8,6 +8,7 @@ let serverProcess
 let serverExitCode = null
 let mainWindow = null
 let macUpdateUrl = null
+let serverToken = ''
 
 function sendUpdate(type, data) {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(`update:${type}`, data)
@@ -88,7 +89,12 @@ function createWindow() {
     minHeight: 700,
     backgroundColor: '#f1eee7',
     icon,
-    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: false, preload }
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+      preload
+    }
   })
   const indexFile = path.join(__dirname, '..', 'web-dist', 'index.html')
   win.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedURL) => {
@@ -179,6 +185,7 @@ async function getLicenseStatus() {
 }
 
 ipcMain.handle('license:get-status', () => getLicenseStatus())
+ipcMain.handle('server:get-token', () => serverToken)
 ipcMain.handle('license:activate', async (_event, licenseKey) => {
   try { return await activateLicense(licenseKey) }
   catch (error) { throw new Error(friendlyLicenseError(error)) }
@@ -315,6 +322,8 @@ app.whenReady().then(async () => {
   fs.mkdirSync(dataDir, { recursive: true })
   fs.mkdirSync(exportDir, { recursive: true })
   const serverEnv = { ...process.env, PHANTOMTOWER_DATA_DIR: dataDir, PHANTOMTOWER_EXPORT_DIR: exportDir }
+  serverToken = crypto.randomBytes(32).toString('hex')
+  serverEnv.PHANTOMTOWER_SERVER_TOKEN = serverToken
   serverEnv.PHANTOMTOWER_VISION_MODELS_DIR = app.isPackaged
     ? path.join(process.resourcesPath, 'vision-models')
     : path.join(__dirname, '..', 'vision-models')

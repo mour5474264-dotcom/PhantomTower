@@ -2,6 +2,8 @@ import http from 'node:http'
 import fs from 'node:fs/promises'
 import path from 'node:path'
 import crypto from 'node:crypto'
+import dns from 'node:dns/promises'
+import net from 'node:net'
 import {fileURLToPath} from 'node:url'
 import {createPersonMask, visionStatus, parseDataUrl} from './vision/index.js'
 
@@ -32,6 +34,7 @@ let generationLogsWriteQueue = Promise.resolve()
 // Development server fallback keeps `npm run server` usable; packaged builds
 // always receive a per-user key from Electron's OS-backed safeStorage.
 const secretKey = process.env.PHANTOMTOWER_SECRET_KEY || crypto.createHash('sha256').update('phantomtower-development-only').digest('hex')
+const serverToken = String(process.env.PHANTOMTOWER_SERVER_TOKEN || '')
 
 function encryptionKey() {
     if (!/^[a-f0-9]{64}$/i.test(secretKey)) throw new Error('本地安全存储未初始化，请重启应用')
@@ -195,12 +198,16 @@ async function write(file, data) {
 
 function normalizePromptTemplate(template, previous = {}) {
     const now = new Date().toISOString()
-    const contentChanged = ['name', 'mode', 'operation', 'systemPrompt', 'defaultNegativePrompt'].some((key) => String(template?.[key] || '') !== String(previous?.[key] || ''))
+    const hasVariant = template && Object.prototype.hasOwnProperty.call(template, 'variant')
+    const inferredVariant = hasVariant ? template.variant : (previous?.variant || (String(template?.id || previous?.id || '') === 'person-replace' ? 'double' : ''))
+    const previousVariant = previous?.variant || (previous?.id === 'person-replace' ? 'double' : '')
+    const contentChanged = ['name', 'mode', 'operation', 'systemPrompt', 'defaultNegativePrompt'].some((key) => String(template?.[key] || '') !== String(previous?.[key] || '')) || String(inferredVariant || '') !== String(previousVariant || '')
     return {
         id: String(template?.id || previous.id || crypto.randomUUID()),
         name: String(template?.name || '').trim(),
         mode: ['text', 'image', 'all'].includes(template?.mode) ? template.mode : (previous.mode || 'all'),
         operation: ['all', 'text', 'batch', 'three-view', 'fusion', 'background', 'prop', 'edit'].includes(template?.operation) ? template.operation : (previous.operation || 'all'),
+        variant: ['single', 'double'].includes(inferredVariant) ? inferredVariant : '',
         systemPrompt: String(template?.systemPrompt || ''),
         defaultNegativePrompt: String(template?.defaultNegativePrompt || ''),
         updatedAt: contentChanged || !previous.id ? now : previous.updatedAt,
@@ -208,7 +215,7 @@ function normalizePromptTemplate(template, previous = {}) {
     }
 }
 
-function promptTemplateMatches(template, mode, operation) {
+function promptTemplateMatches(template, mode, operation, variant = '') {
     const normalizedOperation = ({
         'local-edit': 'edit',
         reference: 'batch',
@@ -216,6 +223,7 @@ function promptTemplateMatches(template, mode, operation) {
     })[operation] || operation
     return template && (template.mode === 'all' || template.mode === mode)
         && (!template.operation || template.operation === 'all' || template.operation === normalizedOperation)
+        && (!variant || !template.variant || template.variant === variant)
 }
 
 async function savePromptTemplates(value, targetFile = files.promptTemplates) {
@@ -226,11 +234,19 @@ async function savePromptTemplates(value, targetFile = files.promptTemplates) {
         if (!item.name || !item.systemPrompt) throw new Error('template name and system prompt are required')
         return true
     })
+    if (targetFile === files.builtInPromptTemplates) {
+        const keys = new Set()
+        for (const item of templates) {
+            const key = `${item.mode}|${item.operation}|${item.variant || 'all'}`
+            if (keys.has(key)) throw new Error(`内置提示词模式重复：${item.name}`)
+            keys.add(key)
+        }
+    }
     const nextById = new Map(templates.map((item) => [item.id, item]))
     const history = await read(files.promptTemplateHistory, [])
     for (const previous of current) {
         const next = nextById.get(previous.id)
-        const changed = !next || ['name', 'mode', 'operation', 'systemPrompt', 'defaultNegativePrompt'].some((key) => next[key] !== previous[key])
+        const changed = !next || ['name', 'mode', 'operation', 'variant', 'systemPrompt', 'defaultNegativePrompt'].some((key) => next[key] !== previous[key])
         if (changed) history.unshift({...previous, archivedAt: new Date().toISOString(), action: next ? 'updated' : 'deleted'})
     }
     await write(files.promptTemplateHistory, history.slice(0, 200))
@@ -284,8 +300,28 @@ function modelWithCapabilities(item) {
     return {
         id,
         name: item?.display_name || item?.displayName || id,
+        ...(item && typeof item === 'object' ? {
+            capabilities: item.capabilities && typeof item.capabilities === 'object' ? item.capabilities : undefined,
+            modalities: item.modalities || item.input_modalities || item.output_modalities || undefined,
+            type: item.type || item.task || undefined
+        } : {}),
         ...(sizes?.length ? {supportedSizes: [...new Set(sizes)]} : {})
     }
+}
+
+function requiresServerAuth(req) {
+    return serverToken && String(req.url || '').startsWith('/api/')
+        && req.url !== '/api/health'
+        && !req.url.startsWith('/api/generated/')
+        && !(req.method === 'GET' && req.url.startsWith('/api/download'))
+}
+
+function authorized(req) {
+    if (!serverToken) return true
+    const supplied = String(req.headers.authorization || '').replace(/^Bearer\s+/i, '')
+        || String(req.headers['x-phantomtower-token'] || '')
+        || String(req.headers.cookie || '').match(/(?:^|;\s*)phantom_tower_token=([^;]+)/)?.[1] || ''
+    return supplied === serverToken
 }
 
 function geminiModelSource(payload) {
@@ -294,13 +330,6 @@ function geminiModelSource(payload) {
         || candidates.find((value) => Array.isArray(value))
         || []
     return Array.isArray(source) ? source : []
-}
-
-function supportsGeminiGeneration(item) {
-    const methods = item?.supportedGenerationMethods || item?.supported_generation_methods
-    // Relays often omit capability metadata. Do not discard a model merely
-    // because the optional field is absent; only filter explicit non-support.
-    return !Array.isArray(methods) || methods.length === 0 || methods.includes('generateContent')
 }
 
 function geminiModelWithCapabilities(item) {
@@ -449,6 +478,70 @@ function geminiUrl(api, model) {
 }
 
 const MAX_ASSET_BYTES = 20 * 1024 * 1024
+const MAX_REMOTE_IMAGE_BYTES = 20 * 1024 * 1024
+const REMOTE_IMAGE_TIMEOUT_MS = 60 * 1000
+
+function isPrivateAddress(address) {
+    const normalized = String(address || '').toLowerCase().replace(/^\[|\]$/g, '')
+    if (normalized.startsWith('::ffff:')) return isPrivateAddress(normalized.slice(7))
+    if (net.isIPv4(normalized)) {
+        const octets = normalized.split('.').map(Number)
+        return octets[0] === 10 || octets[0] === 127 || octets[0] === 169 && octets[1] === 254
+            || octets[0] === 192 && octets[1] === 168
+            || octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31
+    }
+    if (!net.isIPv6(normalized)) return false
+    return normalized === '::1' || normalized === '::' || normalized.startsWith('fc')
+        || normalized.startsWith('fd') || normalized.startsWith('fe8') || normalized.startsWith('fe9')
+        || normalized.startsWith('fea') || normalized.startsWith('feb')
+}
+
+async function assertRemoteImageUrl(value) {
+    let parsed
+    try { parsed = new URL(String(value || '')) } catch { throw new Error('invalid image url') }
+    if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('只支持 HTTP/HTTPS 图片地址')
+    if (parsed.username || parsed.password) throw new Error('图片地址不能包含用户名或密码')
+    const hostname = parsed.hostname.toLowerCase()
+    if (hostname === 'localhost' || hostname === 'localhost.localdomain'
+        || hostname === 'metadata.google.internal' || hostname === 'metadata.google.internal.') {
+        throw new Error('不允许访问本机或云元数据地址')
+    }
+    if (isPrivateAddress(hostname)) {
+        throw new Error('不允许访问内网地址')
+    }
+    if (!net.isIP(hostname)) {
+        const addresses = await dns.lookup(hostname, {all: true, verbatim: true})
+        if (!addresses.length || addresses.some((item) => isPrivateAddress(item.address))) throw new Error('图片地址解析到了内网地址')
+    }
+    return parsed.toString()
+}
+
+async function fetchRemoteImage(url) {
+    let current = await assertRemoteImageUrl(url)
+    for (let redirect = 0; redirect <= 3; redirect += 1) {
+        const response = await fetch(current, {redirect: 'manual', signal: AbortSignal.timeout(REMOTE_IMAGE_TIMEOUT_MS)})
+        if (![301, 302, 303, 307, 308].includes(response.status)) return {response, url: current}
+        if (redirect === 3) throw new Error('远程图片重定向次数过多')
+        const location = response.headers.get('location')
+        if (!location) throw new Error('远程图片重定向地址缺失')
+        current = await assertRemoteImageUrl(new URL(location, current).toString())
+    }
+    throw new Error('远程图片重定向失败')
+}
+
+async function readRemoteImage(response) {
+    const contentLength = Number(response.headers.get('content-length') || 0)
+    if (contentLength > MAX_REMOTE_IMAGE_BYTES) throw new Error('远程图片超过 20 MB 限制')
+    const chunks = []
+    let total = 0
+    for await (const chunk of response.body || []) {
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+        total += buffer.length
+        if (total > MAX_REMOTE_IMAGE_BYTES) throw new Error('远程图片超过 20 MB 限制')
+        chunks.push(buffer)
+    }
+    return Buffer.concat(chunks)
+}
 
 async function requestBuffer(req, maxBytes) {
     const contentLength = Number(req.headers['content-length'] || 0)
@@ -759,6 +852,41 @@ function geminiImages(result) {
     return images
 }
 
+// OpenAI-compatible image endpoints generally do not accept an aspectRatio
+// field. Convert the shared resolution/aspect-ratio controls into dimensions
+// before constructing either JSON or multipart requests.
+const OPENAI_ASPECT_RATIOS = new Set([
+    '1:1', '16:9', '9:16', '4:3', '3:4', '3:2', '2:3', '5:4', '4:5', '21:9'
+])
+
+function openaiSizeForInput(input, modelConfig = null) {
+    // Keep compatibility with older queued requests and custom callers.
+    if (input?.size && input.size !== 'auto') return String(input.size)
+    const resolution = String(input?.resolution || '2K').trim().toUpperCase()
+    const maxDimension = ({'1K': 1024, '2K': 2048, '4K': 4096})[resolution] || 2048
+    const ratioText = String(input?.aspectRatio || '1:1').trim()
+    const [rawWidth, rawHeight] = ratioText.split(':').map(Number)
+    const ratio = OPENAI_ASPECT_RATIOS.has(ratioText) && rawWidth > 0 && rawHeight > 0
+        ? rawWidth / rawHeight : 1
+    const supported = Array.isArray(modelConfig?.supportedSizes)
+        ? modelConfig.supportedSizes.filter((value) => /^\d+x\d+$/i.test(String(value))) : []
+    if (supported.length) {
+        const targetArea = maxDimension * maxDimension
+        const ranked = supported.map((value) => {
+            const [width, height] = String(value).split('x').map(Number)
+            const area = width * height
+            return {value: `${width}x${height}`, ratioDistance: Math.abs(Math.log((width / height) / ratio)), areaDistance: Math.abs(Math.log(area / targetArea))}
+        }).sort((a, b) => a.ratioDistance - b.ratioDistance || a.areaDistance - b.areaDistance)
+        return ranked[0].value
+    }
+    let width = ratio >= 1 ? maxDimension : Math.round(maxDimension * ratio)
+    let height = ratio >= 1 ? Math.round(maxDimension / ratio) : maxDimension
+    // Most image relays require dimensions aligned to 16 pixels.
+    width = Math.max(256, Math.round(width / 16) * 16)
+    height = Math.max(256, Math.round(height / 16) * 16)
+    return `${width}x${height}`
+}
+
 function openaiImages(result) {
     if (Array.isArray(result?.data) && result.data.length) return result.data
     // Relays sometimes return one object, `images`, `output`, or a serialized
@@ -1025,12 +1153,14 @@ async function fetchModels(api) {
     const payload = await upstreamJson(response, '模型接口')
     if (provider === 'gemini' && response.ok) {
         const models = geminiModelSource(payload)
-            .filter(supportsGeminiGeneration)
             .map(geminiModelWithCapabilities)
         return {status: 200, payload: {data: models}}
     }
     if (response.ok) {
         const source = payload?.data || payload?.models || []
+        // Keep the complete upstream model list. Capability names are not
+        // standardized across relays, so filtering here can hide valid image
+        // models before the user has a chance to configure their route.
         return {status: response.status, payload: {...payload, data: source.map(modelWithCapabilities)}}
     }
     return {status: response.status, payload}
@@ -1076,7 +1206,7 @@ async function detectConnection(api) {
         {
             provider: 'gemini', protocol: 'gemini-generate-content', authType: 'query-key', imagePath: '', editPath: '',
             request: () => fetch(`${geminiEndpointRoot(endpoint)}/v1beta/models?key=${encodeURIComponent(api.key)}`),
-            models: (payload) => geminiModelSource(payload).filter(supportsGeminiGeneration)
+            models: (payload) => geminiModelSource(payload)
         }
     ]
     const requested = String(api.provider || '').toLowerCase()
@@ -1097,6 +1227,8 @@ async function detectConnection(api) {
                 continue
             }
             const detection = {...probe, request: undefined, models: undefined, confidence: 'verified', testedAt: new Date().toISOString()}
+            // Preserve every model returned by the provider. Relays frequently
+            // omit reliable image capability metadata or use nonstandard IDs.
             const models = probe.models(payload).map(modelWithCapabilities).filter((item) => item.id)
             detections.push(detection)
             discovered.push(...models.map((item) => ({...item, provider: probe.provider, protocol: probe.protocol, authType: probe.authType, imagePath: probe.imagePath, editPath: probe.editPath, confidence: 'verified', testedAt: detection.testedAt})))
@@ -1116,8 +1248,30 @@ async function detectConnection(api) {
             }
         }
     }
-    if (requested) throw new Error(`无法连接所选协议（${requested}）：${failures.join('；')}`)
-    throw new Error(`无法识别中转站协议。已尝试 OpenAI、Anthropic 和 Gemini：${failures.join('；')}`)
+    if (requested) {
+        const failureText = failures.join('；')
+        const status = Number(failureText.match(/HTTP\s+(\d{3})/i)?.[1] || 0)
+        const providerLabel = requested === 'gemini' ? 'Gemini' : requested === 'anthropic' ? 'Anthropic' : requested === 'mj' ? 'Midjourney' : 'OpenAI'
+        const reason = status === 400
+            ? `${providerLabel} 中转站返回请求格式错误（HTTP 400）。请确认协议和接口地址匹配；Gemini 原生协议需要填写 Gemini 接口根地址，如果中转站提供的是 OpenAI 兼容接口，请切换为“OpenAI 兼容协议”。`
+            : status === 401 || status === 403
+                ? `${providerLabel} 中转站拒绝了 API Key（HTTP ${status}）。请检查 Key 是否正确、是否过期，以及账号是否有权限。`
+                : status === 404
+                    ? `${providerLabel} 接口地址不存在（HTTP 404）。请检查地址，不要把具体接口路径重复填写到地址栏。`
+                    : status === 429
+                        ? `${providerLabel} 中转站当前限流或额度不足（HTTP 429）。请稍后重试或检查账户余额。`
+                        : `${providerLabel} 中转站暂时无法连接${status ? `（HTTP ${status}）` : ''}。请检查网络、地址和协议配置后重试。`
+        const error = new Error(reason)
+        error.status = 502
+        error.code = 'UPSTREAM_CONNECTION_FAILED'
+        error.details = {provider: requested, upstreamStatus: status || null, endpoint}
+        throw error
+    }
+    const error = new Error('无法识别中转站协议。请确认接口地址、API Key 和协议设置；如果中转站提供的是 OpenAI 兼容接口，请选择“OpenAI 兼容协议”。')
+    error.status = 502
+    error.code = 'UPSTREAM_CONNECTION_FAILED'
+    error.details = {provider: 'auto', endpoint, attempts: failures}
+    throw error
 }
 
 function cacheKey(url) {
@@ -1281,17 +1435,20 @@ async function cachedImage(url) {
 }
 
 async function cacheImage(url) {
+    url = await assertRemoteImageUrl(url)
     const existing = await cachedImage(url)
     if (existing) return existing
     let response
     try {
-        response = await fetch(url)
+        const fetched = await fetchRemoteImage(url)
+        response = fetched.response
+        url = fetched.url
     } catch (error) {
         throw error
     }
     if (!response.ok) throw new Error(`image request failed: ${response.status}`)
     const headerContentType = response.headers.get('content-type') || 'image/png'
-    const buffer = Buffer.from(await response.arrayBuffer())
+    const buffer = await readRemoteImage(response)
     const contentType = detectedImageContentType(buffer, headerContentType)
     const entry = {filename: `${cacheKey(url)}.${imageExtension(contentType)}`, contentType}
     const file = await writeGeneratedImage(entry.filename, buffer)
@@ -1407,16 +1564,18 @@ try {
 }
 await repairStoredImageExtensions()
 
-const serverPort = Number(process.env.PHANTOMTOWER_PORT || 4317)
+// The renderer and persisted local URLs use this fixed application port.
+const serverPort = 4317
 http.createServer(async (req, res) => {
     res.req = req
     if (req.method === 'OPTIONS') {
         const origin = req.headers.origin
         const allowedOrigin = !origin || origin === 'null' || /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin) ? (origin || 'null') : 'null'
-        res.writeHead(204, {'Access-Control-Allow-Origin': allowedOrigin, 'Access-Control-Allow-Headers': 'Content-Type', 'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS', 'Vary': 'Origin'});
+        res.writeHead(204, {'Access-Control-Allow-Origin': allowedOrigin, 'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-PhantomTower-Token', 'Access-Control-Allow-Methods': 'GET,POST,DELETE,OPTIONS', 'Vary': 'Origin'});
         return res.end()
     }
     try {
+        if (requiresServerAuth(req) && !authorized(req)) return send(res, 401, {error: '本地服务认证失败', code: 'LOCAL_AUTH_REQUIRED'})
         if (req.url === '/api/health' && req.method === 'GET') return send(res, 200, {ok: true, dataDir, exportDir})
         if (req.url === '/api/vision/status' && req.method === 'GET') return send(res, 200, await visionStatus())
         if (req.url === '/api/assets/upload' && req.method === 'POST') {
@@ -1449,12 +1608,22 @@ http.createServer(async (req, res) => {
         }
         if (req.url === '/api/cache/clear' && req.method === 'POST') {
             const entries = await fs.readdir(generatedDir, {withFileTypes: true}).catch(() => [])
+            const records = await read(files.records, [])
+            const referenced = new Set(records.flatMap((record) => (record?.images || []).map((image) => {
+                const value = String(image?.url || '')
+                return value.startsWith('http://127.0.0.1:4317/api/generated/')
+                    ? decodeURIComponent(value.split('/').pop() || '') : ''
+            }).filter(Boolean)))
             let removed = 0
             for (const entry of entries) {
                 if (!entry.isFile()) continue
+                if (referenced.has(entry.name)) continue
                 await fs.rm(path.join(generatedDir, entry.name), {force: true})
                 removed += 1
             }
+            const cache = await read(files.imageCache, {})
+            const retainedCache = Object.fromEntries(Object.entries(cache).filter(([, item]) => referenced.has(item?.filename)))
+            await write(files.imageCache, retainedCache)
             return send(res, 200, {ok: true, removed})
         }
         if (req.url.startsWith('/api/generate/cancel') && req.method === 'POST') {
@@ -1473,6 +1642,25 @@ http.createServer(async (req, res) => {
             const apis = incomingApis.map((api) => {
                 const previous = current.apis.find((item) => item.id === api.id)
                 const next = {...api}
+                const previousProvider = String(previous?.provider || previous?.detectedRoute?.provider || '').trim().toLowerCase()
+                const nextProvider = String(next.provider || '').trim().toLowerCase()
+                if (previous && nextProvider && previousProvider && previousProvider !== nextProvider) {
+                    // A protocol change starts a new model namespace. Keep only
+                    // models explicitly authored for the newly selected
+                    // protocol so the old discovery result cannot leak back
+                    // into the workspace after reload.
+                    const expectedProtocol = nextProvider === 'gemini' ? 'gemini-generate-content'
+                        : nextProvider === 'anthropic' ? 'anthropic-messages'
+                            : nextProvider === 'mj' ? 'mj-proxy' : 'openai-images'
+                    next.models = Array.isArray(next.models)
+                        ? next.models.filter((model) => String(model?.protocol || '').toLowerCase() === expectedProtocol)
+                        : []
+                    next.modelRoutes = Object.fromEntries(Object.entries(next.modelRoutes || {})
+                        .filter(([, route]) => String(route?.protocol || '').toLowerCase() === expectedProtocol))
+                    delete next.detectedRoute
+                    next.detectedProtocols = []
+                    next.ambiguousModels = []
+                }
                 if (next.key) next.encryptedKey = encryptSecret(next.key)
                 else if (previous?.encryptedKey) next.encryptedKey = previous.encryptedKey
                 delete next.key
@@ -1520,7 +1708,7 @@ http.createServer(async (req, res) => {
             return send(res, 200, restored)
         }
         if (req.url === '/api/builtin-prompt-templates' && req.method === 'GET') {
-            return send(res, 200, await read(files.builtInPromptTemplates, []))
+            return send(res, 200, (await read(files.builtInPromptTemplates, [])).map((item) => normalizePromptTemplate(item, item)))
         }
         if (req.url === '/api/builtin-prompt-templates' && req.method === 'POST') {
             return send(res, 200, await savePromptTemplates(await json(req), files.builtInPromptTemplates))
@@ -1693,10 +1881,16 @@ http.createServer(async (req, res) => {
                 const detection = result.payload.detection
                 const discoveredModels = result.payload.data || []
                 const previousModels = Array.isArray(stored?.models) ? stored.models : []
+                const providerChanged = Boolean(stored?.provider && detection?.provider
+                    && String(stored.provider).toLowerCase() !== String(detection.provider).toLowerCase())
+                const mergeablePreviousModels = providerChanged
+                    ? previousModels.filter((model) => String(model?.provider || '').toLowerCase() === String(detection.provider).toLowerCase()
+                        || String(model?.protocol || '').toLowerCase() === String(detection.protocol || '').toLowerCase())
+                    : previousModels
                 const models = discoveredModels.map((model) => {
                     const routeKey = `${model.protocol || detection.protocol}:${model.id}`
-                    const saved = previousModels.find((candidate) => candidate.routeKey === routeKey)
-                        || previousModels.find((candidate) => candidate.modelName === model.id && candidate.protocol === model.protocol)
+                    const saved = mergeablePreviousModels.find((candidate) => candidate.routeKey === routeKey)
+                        || mergeablePreviousModels.find((candidate) => candidate.modelName === model.id && candidate.protocol === model.protocol)
                     const manual = saved?.routeSource === 'manual'
                         || (!saved?.routeSource && saved?.protocol && saved.protocol !== model.protocol)
                     return normalizeModelConfig({
@@ -1714,7 +1908,7 @@ http.createServer(async (req, res) => {
                         routeSource: manual ? 'manual' : 'auto'
                     }, model)
                 }).filter(Boolean)
-                const preservedManual = previousModels.filter((saved) => saved.routeSource === 'manual' && !models.some((model) => model.id === saved.id))
+                const preservedManual = mergeablePreviousModels.filter((saved) => saved.routeSource === 'manual' && !models.some((model) => model.id === saved.id))
                 const allModels = [...models, ...preservedManual]
                 const nextApis = settings.apis.map((item) => item.id === api.id ? {
                     ...item,
@@ -1766,7 +1960,9 @@ http.createServer(async (req, res) => {
             // the user-facing operation. Normalize them before resolving presets.
             const operation = promptTemplateOperation(input.operation, mode)
             const builtIns = await read(files.builtInPromptTemplates, [])
-            const builtIn = builtIns.find((item) => promptTemplateMatches(item, mode, operation))
+            const requestedVariant = ['single', 'double'].includes(input.builtinVariant) ? input.builtinVariant : ''
+            const builtIn = builtIns.find((item) => requestedVariant && item?.variant === requestedVariant && promptTemplateMatches(item, mode, operation, requestedVariant))
+                || builtIns.find((item) => promptTemplateMatches(item, mode, operation, requestedVariant))
             const templates = await read(files.promptTemplates, [])
             const userTemplate = input.presetId ? templates.find((item) => item.id === input.presetId) : null
             if (input.presetId && !userTemplate) return send(res, 400, {error: '所选提示词预设不存在'})
@@ -1794,6 +1990,7 @@ http.createServer(async (req, res) => {
                 const route = routeForModel(api, input.model, input.modelConfigId)
                 finalRoute = route
                 const provider = route.provider
+                const requestSize = provider === 'gemini' ? '' : openaiSizeForInput(input, configuredModel)
                 const payload = {
                     model: input.model,
                     prompt: finalPrompt,
@@ -1801,7 +1998,7 @@ http.createServer(async (req, res) => {
                     quality: 'high',
                     response_format: 'url'
                 }
-                if (input.size && input.size !== 'auto') payload.size = input.size
+                if (requestSize) payload.size = requestSize
                 const referenceImages = requestedImages
                 const isReferenceRequest = referenceImages.length > 0
                 const imagePath = route.protocol === 'openai-chat'
@@ -1818,7 +2015,7 @@ http.createServer(async (req, res) => {
                     body = JSON.stringify(messagesPayload(input.model, finalPrompt, referenceImages))
                 } else if (isReferenceRequest && route.protocol === 'openai-images') {
                     const form = new FormData()
-                    appendGenerationOptions(form, payload, input)
+                    appendGenerationOptions(form, payload, {...input, size: requestSize})
                     for (const [imageIndex, image] of referenceImages.entries()) {
                         form.append('image[]', dataUrlFile(image), referenceFilename(image, imageIndex))
                     }
@@ -1858,7 +2055,9 @@ http.createServer(async (req, res) => {
                     imagePath,
                     referenceImageCount: referenceImages.length,
                     referenceImages: referenceImages.map((image) => ({mimeType: dataUrlParts(image)?.mimeType || '', bytes: dataUrlByteLength(image)})),
-                    size: input.size || null,
+                    size: requestSize || null,
+                    resolution: input.resolution || null,
+                    aspectRatio: input.aspectRatio || null,
                     clientRequestStartedAt: new Date(upstreamStartedAt).toISOString(),
                     status: 'dispatching'
                 }
@@ -1876,11 +2075,11 @@ http.createServer(async (req, res) => {
                     await appendGenerationLog({...requestLog, finishedAt: new Date().toISOString(), durationMs: Date.now() - upstreamStartedAt, upstreamDurationMs: Date.now() - upstreamStartedAt, status: 'network-error', error: error.message, code: error?.cause?.code || error?.code || ''})
                     return send(res, 504, {
                         requestId,
-                        error: upstreamFetchError(error, '图片生成接口', input.size),
+                        error: upstreamFetchError(error, '图片生成接口', requestSize),
                         code: String(error?.cause?.code || error?.code || 'UPSTREAM_FETCH_ERROR'),
                         original: {name: error?.name || '', code: error?.cause?.code || error?.code || '', message: error?.cause?.message || error?.message || ''},
                         provider,
-                        hint: `本次请求尺寸为 ${input.size || '默认尺寸'}；请确认当前模型支持该尺寸。`
+                        hint: `本次请求使用 ${input.resolution || '默认分辨率'} / ${input.aspectRatio || '1:1'}，实际尺寸 ${requestSize || '由 Gemini 原生接口决定'}；请确认当前模型支持该设置。`
                     })
                 } finally {
                     activeGenerations.delete(activeTaskId)
@@ -1926,9 +2125,9 @@ http.createServer(async (req, res) => {
                         })
                     } catch (error) {
                         return send(res, 504, {
-                            error: upstreamFetchError(error, 'Gemini 回退接口', input.size),
+                            error: upstreamFetchError(error, 'Gemini 回退接口', requestSize),
                             provider: 'gemini',
-                            hint: `本次请求尺寸为 ${input.size || '默认尺寸'}；请确认 Gemini 接口地址、网络和中转站状态。`
+                            hint: `本次请求使用 ${input.resolution || '默认分辨率'} / ${input.aspectRatio || '1:1'}；请确认 Gemini 接口地址、网络和中转站状态。`
                         })
                     }
                     try {
@@ -1946,7 +2145,7 @@ http.createServer(async (req, res) => {
                     provider: responseProvider,
                     endpoint: safeEndpoint(responseProvider === 'gemini' ? geminiUrl(api, input.model) : apiUrl(api.endpoint, imagePath)),
                     upstream: diagnosticValue(result),
-                    hint: isReferenceRequest ? '当前请求包含参考图，请确认模型支持人物替换/图生图，并检查参考图尺寸。' : `当前请求尺寸为 ${input.size || '默认尺寸'}；请确认模型支持该尺寸。`
+                    hint: isReferenceRequest ? `当前请求包含参考图，使用 ${input.resolution || '默认分辨率'} / ${input.aspectRatio || '1:1'}（实际 ${requestSize || 'Gemini 原生尺寸'}）；请确认模型支持人物替换/图生图。` : `当前请求使用 ${input.resolution || '默认分辨率'} / ${input.aspectRatio || '1:1'}（实际 ${requestSize || 'Gemini 原生尺寸'}）；请确认模型支持该设置。`
                 })
                 const normalizedData = responseProvider === 'gemini'
                     ? geminiImages(result)
@@ -2050,6 +2249,7 @@ http.createServer(async (req, res) => {
                     effectivePrompt: finalPrompt,
                     presetId: userTemplate?.id || null,
                     builtinPresetId: builtIn?.id || null,
+                    builtinVariant: builtIn?.variant || requestedVariant || null,
                     imageCount: input.images?.length || 0,
                     materials: (input.materials || []).map((item, index) => ({
                         index: index + 1,
@@ -2060,16 +2260,22 @@ http.createServer(async (req, res) => {
                 responses,
                 images: []
             }
-            Promise.all(persistedImages.map(async (image) => ({
-                ...(await externalizeRecordImage(image)),
-                id: crypto.randomUUID(),
-                taskId: input.taskId || null,
-                parentResultId: input.parentResultId || null,
-                version: Math.max(1, Number(input.version || 1))
-            }))).then((recordImages) => appendGenerationRecord({...record, images: recordImages})).catch((error) => {
+            let persistenceWarning = ''
+            try {
+                const recordImages = await Promise.all(persistedImages.map(async (image) => ({
+                    ...(await externalizeRecordImage(image)),
+                    id: crypto.randomUUID(),
+                    taskId: input.taskId || null,
+                    parentResultId: input.parentResultId || null,
+                    version: Math.max(1, Number(input.version || 1))
+                })))
+                await appendGenerationRecord({...record, images: recordImages})
+            } catch (error) {
+                persistenceWarning = '生成成功，但历史记录保存失败，请稍后检查本地数据目录。'
                 console.error('generation record persistence failed:', error.message)
-            })
+            }
             const payload = {created: Date.now(), requestId, data: responseImages}
+            if (persistenceWarning) payload.persistenceWarning = persistenceWarning
             if (input.debug) {
                 payload.debug = {
                     note: '仅用于排查，字符串最长 2000 字符，深度和数组长度均有限制',
@@ -2085,7 +2291,11 @@ http.createServer(async (req, res) => {
     } catch (error) {
         if (error.name !== 'AbortError') {
             console.error(`[${req.method} ${req.url}] ${error.stack || error.message}`)
-            send(res, error.status || 500, {error: error.message, code: error.code || 'LOCAL_SERVER_ERROR'})
+            send(res, error.status || 500, {
+                error: error.message,
+                code: error.code || 'LOCAL_SERVER_ERROR',
+                ...(error.details && typeof error.details === 'object' ? {details: error.details} : {})
+            })
         }
     }
 }).listen(serverPort, '127.0.0.1', () => console.log(`PhantomTower local server: http://127.0.0.1:${serverPort}`))

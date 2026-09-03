@@ -8,5 +8,16 @@ dist.zip
 electron-runtime.zip
 *.zip
 release/win-unpacked/
+web-dist/
+server-dist/
 data/license-admin-secret.txt
 data/license-admin-records.json
+data/generated/
+data/assets/
+data/export/
+data/settings.json
+data/settings.json.migration-backup
+data/generation-logs.json
+data/generation-records.json
+data/image-cache.json
+data/prompt-template-history.json
