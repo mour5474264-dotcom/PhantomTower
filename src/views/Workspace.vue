@@ -115,6 +115,11 @@ function generationErrorSummary(exception, fallback = '生成失败') {
   const details = exception?.details && typeof exception.details === 'object' ? exception.details : {}
   const status = Number(details.status || exception?.status || details.upstreamStatus || 0)
   const code = String(details.code || exception?.code || '').toUpperCase()
+  if (code === 'UPSTREAM_DUPLICATE_RESPONSE') return '中转站返回了重复的生成响应，未作为新图保存。请核对服务商记录或切换中转站。'
+  const upstreamMessage = String(details.upstream?.error?.message || exception?.message || '')
+  if (/content policy|safety|内容安全|内容政策|moderation/i.test(upstreamMessage)) {
+    return '上游报告图片或提示词未通过内容安全审核，请检查素材和描述。'
+  }
   if (details.generationAcceptedUnknown || ['UPSTREAM_524', 'UPSTREAM_RESPONSE_TIMEOUT'].includes(code)) {
     return '中转站响应超时，请先确认服务商记录。'
   }
@@ -124,7 +129,10 @@ function generationErrorSummary(exception, fallback = '生成失败') {
   }
   if (status === 401 || status === 403) return 'API Key 或账号权限无效，请检查配置。'
   if (status === 413) return '参考图或请求过大，请减少图片或改用 1K。'
-  if (status === 400) return '请求参数不符合当前模型要求，请检查图片和尺寸。'
+  if (status === 400) {
+    const message = String(exception?.message || '').split(/\r?\n/)[0].trim()
+    return message ? (message.length > 120 ? `${message.slice(0, 117)}...` : message) : '上游拒绝了请求，请在调用日志中查看具体原因。'
+  }
   if (/ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ECONNRESET|ETIMEDOUT|CONNECT_TIMEOUT/.test(code)) {
     return '无法连接中转站，请检查网络和 API 地址。'
   }
@@ -962,7 +970,7 @@ function buildMaterialPrompt(labeled, taskType = 'text', taskLabel = '提示词�
   const primary = labeled.find((item) => item.primary)
   const manifest = ['提示词可直接使用“人物参考图”“目标图/构图图”“道具图”“场景参考图”“动作参考图”“画面参考图”或“编辑参考图”指代对应类别，无需使用图片序号。', '本次请求会同时发送以上全部参考图；本次主参考图是“' + (primary?.promptLabel || '无') + '”。当规则提到目标图、构图图或主参考图时，均以该图片为准。', ...labeled.map((item, index) => `图片${index + 1}：${item.promptLabel}${item.primary ? '（本次主参考图）' : ''}（${item.role}）`)].join('\n');
   const defaultRule = taskType === 'reference'
-      ? '以主目标图为画面基础，保持其构图、动作、位置、遮挡和透视。人物参考图只提供人物身份与外观；如上传背景参考图，则将其环境、场景氛围和背景元素融入主目标图；如上传道具图，则将其作为画面中人物自然使用或呈现的道具。未上传的人物、背景或道具素材不作替换要求。'
+      ? '以主目标图为画面基础，保持其构图、人物位置、占画面比例和透视。人物参考图提供替换人物的身份与完整外观；动作按下方本次动作来源规则执行，并保持合理的支撑、接触和遮挡。如上传背景参考图，则将其环境、场景氛围和背景元素融入主目标图；如上传道具图，则将其作为画面中人物自然使用或呈现的道具。未上传的人物、背景或道具素材不作替换要求。'
       : taskType === 'pose'
           ? '保持人物参考中的同一人物，采用最后一张动作参考的姿势和身体朝向；不得带入动作参考人物的身份、脸部和背景。'
           : taskType === 'prop'
@@ -990,7 +998,7 @@ function buildMaterialPrompt(labeled, taskType = 'text', taskLabel = '提示词�
       ? '编辑参考图不是第二张待编辑画布，也不得整张覆盖或合成到主参考图。它只提供用户在补充提示词中明确指定的内容或视觉特征，例如某个道具、花材、材质、色调、光线或氛围。只借用与明确要求有关的特征；未明确要求时不得使用它。若用户明确要求色调或光线调整，可在完成该要求所需范围内调整全图，同时保持主体、构图、空间关系和未指定内容不变。'
       : '';
   const fullPersonReplacementRule = taskType === 'reference' && labeled.some((item) => item.role === 'person_reference')
-      ? '【完整人物替换硬约束】人物参考图不是只用于换脸。必须从头发、脸、颈部、肩膀、躯干、手臂、腿部到服装边界，生成同一个完整人物，保证脸部身份与身体体型、肤色、发型和服装自然属于同一人。目标图只负责画幅、镜头、人物位置、大小、姿势、落脚点、遮挡和环境；不得保留目标图原人物的脸或身体后仅叠加一张新脸，不得出现脸和身体不匹配、脖子接缝、肤色断层或头身比例错误。'
+      ? '【完整人物替换硬约束】对本次选定的替换人物，先清除原人物的身份、身体和服装残留，再在原位置生成参考人物的完整外观。人物参考图不是只用于换脸，头发、脸、颈部、肩膀、躯干、可见四肢和服装必须自然属于参考人物；被遮挡的肢体不强行补画。目标图提供画幅、镜头、人物位置、占画面比例和环境；动作按本次动作来源规则执行，重新匹配合理的落脚点、接触阴影和遮挡。不得保留原人物后叠加新脸，不得出现脸身不匹配、脖子接缝、肤色断层、头身比例错误或重复肢体。'
       : '';
   const rule = [configuredRule, defaultRule, batchMaterialRule, editReferenceRule, fullPersonReplacementRule].filter(Boolean).join('\n\n');
   return `【本次只处理一个任务：${taskLabel}】\n${manifest}\n\n【执行规则】\n${rule}`;

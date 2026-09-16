@@ -1,12 +1,17 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { RouterLink, RouterView } from 'vue-router'
-import { Images, Settings2, Server, History, SlidersHorizontal, ChevronDown } from 'lucide-vue-next'
+import { RouterLink, RouterView, useRoute } from 'vue-router'
+import { Images, Settings2, Server, History, SlidersHorizontal, ChevronDown, Grid2X2 } from 'lucide-vue-next'
 import { ElConfigProvider } from 'element-plus'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import { getSettings, saveSettings, notifyActiveApiChanged } from './api'
 
 const locale = zhCn
+const route = useRoute()
+// The canvas owns its own navigation and full-screen workspace.  Keeping the
+// Vue shell out of this route prevents a second application chrome from being
+// nested around it.
+const isCanvasRoute = computed(() => route.path === '/canvas' || route.path.startsWith('/canvas/'))
 
 const apiProfiles = ref([])
 const activeApiId = ref('')
@@ -127,6 +132,7 @@ onUnmounted(() => {
       <RouterLink to="/"><Images :size="17" />创作工作台</RouterLink>
       <RouterLink to="/presets"><Settings2 :size="17" />提示词预设</RouterLink>
       <RouterLink to="/history"><History :size="17" />生成记录</RouterLink>
+      <RouterLink to="/canvas"><Grid2X2 :size="17" />无限画布</RouterLink>
       <RouterLink to="/apis"><Server :size="17" />API 管理</RouterLink>
       <RouterLink to="/settings"><SlidersHorizontal :size="17" />设置中心</RouterLink>
     </nav>
@@ -146,7 +152,10 @@ onUnmounted(() => {
   </header>
   <main v-if="isAuthorized">
     <RouterView v-slot="{ Component }">
-      <KeepAlive>
+      <!-- The React canvas must unmount when leaving so its router, event
+           listeners and object URLs cannot remain alive behind the workbench. -->
+      <component v-if="isCanvasRoute" :is="Component" />
+      <KeepAlive v-else>
         <component :is="Component" />
       </KeepAlive>
     </RouterView>

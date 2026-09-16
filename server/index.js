@@ -6,6 +6,7 @@ import dns from 'node:dns/promises'
 import net from 'node:net'
 import {fileURLToPath} from 'node:url'
 import {createPersonMask, visionStatus, parseDataUrl} from './vision/index.js'
+import {createGenerationResponseGuard} from './generation-response-guard.js'
 
 const dataDir = process.env.PHANTOMTOWER_DATA_DIR || path.join(path.dirname(fileURLToPath(import.meta.url)), '../data')
 const generatedDir = path.join(dataDir, 'generated')
@@ -31,6 +32,12 @@ const pendingImages = new Map()
 const pendingGeneratedImages = new Map()
 let recordsWriteQueue = Promise.resolve()
 let generationLogsWriteQueue = Promise.resolve()
+let generationResponseGuardPromise
+
+function generationResponseGuard() {
+    generationResponseGuardPromise ||= read(files.generationLogs, []).then(createGenerationResponseGuard)
+    return generationResponseGuardPromise
+}
 // Development server fallback keeps `npm run server` usable; packaged builds
 // always receive a per-user key from Electron's OS-backed safeStorage.
 const secretKey = process.env.PHANTOMTOWER_SECRET_KEY || crypto.createHash('sha256').update('phantomtower-development-only').digest('hex')
@@ -934,8 +941,8 @@ function friendlyProviderError(result, status, referenceRequest = false) {
     if (status === 503 && /no available channel|available channel|渠道|分组/i.test(text)) {
         return '中转站当前没有可用的模型渠道，通常是模型分组未配置、渠道暂时下线或账户无该模型权限；这不是图片尺寸错误。'
     }
-    if (status === 503 && /content policy|safety|policy|违反.*内容|内容政策|moderation/i.test(text)) {
-        return '图片请求被上游内容安全策略拦截（HTTP 503）。请删减或改写可能触发审核的描述，避免真实人物、未成年人、裸露、暴力等敏感内容后重试；本次请求通常不会返回图片。'
+    if (/content policy|safety|内容安全|内容政策|moderation/i.test(text)) {
+        return '上游报告图片或提示词未通过内容安全审核，请检查素材和描述；这不是图片尺寸错误。'
     }
     if (/insufficient\s+(?:account\s+)?balance|余额不足|账户余额不足/i.test(text)) {
         return '中转站账户余额不足，Gemini 请求未执行。请为该中转站充值或更换有余额的 API 配置。'
@@ -974,7 +981,9 @@ async function fetchImageGeneration(url, options) {
     const signal = options.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal
     try {
         const startedAt = Date.now()
-        const response = await fetch(url, {...options, signal})
+        const headers = new Headers(options.headers)
+        headers.set('Cache-Control', 'no-store')
+        const response = await fetch(url, {...options, headers, cache: 'no-store', signal})
         response._phantomTimeoutSignal = timeoutSignal
         response._phantomHeadersDurationMs = Date.now() - startedAt
         return response
@@ -1043,9 +1052,22 @@ async function activeApi() {
     return api ? {...api, key: decryptSecret(api.encryptedKey)} : null
 }
 
+async function proxyCanvasUpstream(req, res, target, options = {}) {
+    const api = await activeApi()
+    if (!api?.endpoint || !api?.key) return send(res, 400, {error: '请先配置并启用 API', code: 'API_NOT_CONFIGURED'})
+    const headers = {...(options.headers || {}), Authorization: `Bearer ${api.key}`}
+    const init = {method: req.method, headers}
+    if (req.method !== 'GET' && req.method !== 'HEAD') init.body = await requestBuffer(req, options.maxBytes || 50 * 1024 * 1024)
+    const upstream = await fetch(target, init)
+    const contentType = upstream.headers.get('content-type') || 'application/octet-stream'
+    const buffer = Buffer.from(await upstream.arrayBuffer())
+    res.writeHead(upstream.status, {'Content-Type': contentType, 'Access-Control-Allow-Origin': 'null', 'Cache-Control': 'no-store'})
+    return res.end(buffer)
+}
+
 function upstreamRequestId(result) {
     if (!result || typeof result !== 'object') return ''
-    return String(result.request_id || result.requestId || result.id || result.error?.request_id || result.error?.requestId || '').trim()
+    return String(result.responseId || result.request_id || result.requestId || result.id || result.error?.request_id || result.error?.requestId || '').trim()
 }
 
 async function generateMjImage(api, model, prompt, images, signal) {
@@ -1577,6 +1599,44 @@ http.createServer(async (req, res) => {
     try {
         if (requiresServerAuth(req) && !authorized(req)) return send(res, 401, {error: '本地服务认证失败', code: 'LOCAL_AUTH_REQUIRED'})
         if (req.url === '/api/health' && req.method === 'GET') return send(res, 200, {ok: true, dataDir, exportDir})
+        if (req.url === '/api/records/canvas' && req.method === 'POST') {
+            const input = await json(req)
+            const images = Array.isArray(input.images) ? input.images.slice(0, 15).map((image) => {
+                const value = typeof image === 'string' ? image : image?.url || image?.dataUrl || ''
+                return value ? {url: String(value)} : null
+            }).filter(Boolean) : []
+            if (!images.length) return send(res, 400, {ok: false, error: '画布记录至少需要一张图片', code: 'CANVAS_RECORD_IMAGE_REQUIRED'})
+            const now = new Date().toISOString()
+            await appendGenerationRecord({
+                id: `canvas-${crypto.randomUUID()}`,
+                createdAt: now,
+                model: String(input.model || 'canvas'),
+                modelConfigId: null,
+                upstreamName: '无限画布',
+                protocol: 'canvas',
+                prompt: String(input.prompt || ''),
+                request: {taskId: String(input.taskId || crypto.randomUUID()), operation: 'canvas', canvasTitle: String(input.canvasTitle || '')},
+                images
+            })
+            return send(res, 200, {ok: true})
+        }
+        if (req.url === '/api/canvas/video' && req.method === 'POST') {
+            const api = await activeApi()
+            if (!api) return send(res, 400, {error: '请先配置并启用 API', code: 'API_NOT_CONFIGURED'})
+            return proxyCanvasUpstream(req, res, apiUrl(api.endpoint, 'videos'), {headers: {'Content-Type': String(req.headers['content-type'] || 'application/octet-stream')}})
+        }
+        const canvasVideoMatch = req.url.match(/^\/api\/canvas\/video\/([^/?]+)(\/content)?$/)
+        if (canvasVideoMatch && req.method === 'GET') {
+            const api = await activeApi()
+            if (!api) return send(res, 400, {error: '请先配置并启用 API', code: 'API_NOT_CONFIGURED'})
+            const suffix = canvasVideoMatch[2] ? '/content' : ''
+            return proxyCanvasUpstream(req, res, apiUrl(api.endpoint, `videos/${encodeURIComponent(canvasVideoMatch[1])}${suffix}`))
+        }
+        if (req.url === '/api/canvas/audio' && req.method === 'POST') {
+            const api = await activeApi()
+            if (!api) return send(res, 400, {error: '请先配置并启用 API', code: 'API_NOT_CONFIGURED'})
+            return proxyCanvasUpstream(req, res, apiUrl(api.endpoint, 'audio/speech'), {headers: {'Content-Type': 'application/json'}})
+        }
         if (req.url === '/api/vision/status' && req.method === 'GET') return send(res, 200, await visionStatus())
         if (req.url === '/api/assets/upload' && req.method === 'POST') {
             const form = await multipartForm(req)
@@ -1985,6 +2045,7 @@ http.createServer(async (req, res) => {
             // Gemini, and record/response shaping happens after the loop.
             let responseProvider = null
             let finalRoute = null
+            const claimGenerationResponse = await generationResponseGuard()
             for (let index = 0; index < Math.max(1, Number(input.n || 1)); index += 1) {
                 if (controller.signal.aborted) break
                 const route = routeForModel(api, input.model, input.modelConfigId)
@@ -2054,7 +2115,13 @@ http.createServer(async (req, res) => {
                     endpoint: safeEndpoint(provider === 'gemini' ? geminiUrl(api, input.model) : apiUrl(api.endpoint, imagePath)),
                     imagePath,
                     referenceImageCount: referenceImages.length,
-                    referenceImages: referenceImages.map((image) => ({mimeType: dataUrlParts(image)?.mimeType || '', bytes: dataUrlByteLength(image)})),
+                    referenceImages: referenceImages.map((image, imageIndex) => ({
+                        mimeType: dataUrlParts(image)?.mimeType || '',
+                        bytes: dataUrlByteLength(image),
+                        sha256: crypto.createHash('sha256').update(parseDataUrl(image).buffer).digest('hex'),
+                        role: input.materials?.[imageIndex]?.role || '',
+                        primary: Boolean(input.materials?.[imageIndex]?.primary)
+                    })),
                     size: requestSize || null,
                     resolution: input.resolution || null,
                     aspectRatio: input.aspectRatio || null,
@@ -2136,8 +2203,21 @@ http.createServer(async (req, res) => {
                         return send(res, response.ok ? 502 : response.status, {error: error.message, code: error.code || 'UPSTREAM_RESPONSE_ERROR', generationAcceptedUnknown: ['UPSTREAM_524', 'UPSTREAM_RESPONSE_TIMEOUT'].includes(error.code), provider: 'gemini', endpoint: safeEndpoint(geminiUrl(api, input.model)), upstream: diagnosticValue(result), hint: '中转站不支持 OpenAI Images API，且 Gemini 原生接口也未返回 JSON，请核对该中转站的 Gemini 接口地址。'})
                     }
                 }
-                await appendGenerationLog({...requestLog, finishedAt: new Date().toISOString(), durationMs: Date.now() - upstreamStartedAt, upstreamDurationMs: Date.now() - upstreamStartedAt, headersDurationMs: response?._phantomHeadersDurationMs || null, bodyDurationMs: response?._phantomHeadersDurationMs ? Math.max(0, Date.now() - upstreamStartedAt - response._phantomHeadersDurationMs) : null, status: response.ok ? 'success-response' : 'upstream-error', httpStatus: response.status, upstreamRequestId: upstreamRequestId(result), upstream: diagnosticValue(result), usage: result?.usage || result?.usageMetadata || null})
-                if (!response.ok) return send(res, response.status, {
+                const responseLog = {
+                    ...requestLog,
+                    finishedAt: new Date().toISOString(),
+                    durationMs: Date.now() - upstreamStartedAt,
+                    upstreamDurationMs: Date.now() - upstreamStartedAt,
+                    headersDurationMs: response?._phantomHeadersDurationMs || null,
+                    bodyDurationMs: response?._phantomHeadersDurationMs ? Math.max(0, Date.now() - upstreamStartedAt - response._phantomHeadersDurationMs) : null,
+                    httpStatus: response.status,
+                    upstreamRequestId: upstreamRequestId(result),
+                    upstream: diagnosticValue(result),
+                    usage: result?.usage || result?.usageMetadata || null
+                }
+                if (!response.ok) {
+                    await appendGenerationLog({...responseLog, status: 'upstream-error'})
+                    return send(res, response.status, {
                     requestId,
                     error: friendlyProviderError(result, response.status, isReferenceRequest),
                     code: `UPSTREAM_HTTP_${response.status}`,
@@ -2146,7 +2226,8 @@ http.createServer(async (req, res) => {
                     endpoint: safeEndpoint(responseProvider === 'gemini' ? geminiUrl(api, input.model) : apiUrl(api.endpoint, imagePath)),
                     upstream: diagnosticValue(result),
                     hint: isReferenceRequest ? `当前请求包含参考图，使用 ${input.resolution || '默认分辨率'} / ${input.aspectRatio || '1:1'}（实际 ${requestSize || 'Gemini 原生尺寸'}）；请确认模型支持人物替换/图生图。` : `当前请求使用 ${input.resolution || '默认分辨率'} / ${input.aspectRatio || '1:1'}（实际 ${requestSize || 'Gemini 原生尺寸'}）；请确认模型支持该设置。`
-                })
+                    })
+                }
                 const normalizedData = responseProvider === 'gemini'
                     ? geminiImages(result)
                     : ['anthropic-messages', 'openai-chat'].includes(route.protocol)
@@ -2178,19 +2259,10 @@ http.createServer(async (req, res) => {
                 }
                 if (!normalizedData.length) {
                     const noImageError = '图片接口返回成功，但响应中没有可识别的图片数据'
-                    await appendGenerationLog({...requestLog,
-                        finishedAt: new Date().toISOString(),
-                        durationMs: Date.now() - upstreamStartedAt,
-                        upstreamDurationMs: Date.now() - upstreamStartedAt,
-                        headersDurationMs: response?._phantomHeadersDurationMs || null,
-                        bodyDurationMs: response?._phantomHeadersDurationMs ? Math.max(0, Date.now() - upstreamStartedAt - response._phantomHeadersDurationMs) : null,
+                    await appendGenerationLog({...responseLog,
                         status: 'upstream-response-error',
-                        httpStatus: response.status,
                         code: 'UPSTREAM_NO_IMAGE_DATA',
-                        error: noImageError,
-                        upstreamRequestId: upstreamRequestId(result),
-                        upstream: diagnosticValue(result),
-                        usage: result?.usage || result?.usageMetadata || null
+                        error: noImageError
                     })
                     return send(res, 502, {
                         requestId,
@@ -2203,6 +2275,29 @@ http.createServer(async (req, res) => {
                         upstream: diagnosticValue(result)
                     })
                 }
+                const duplicateResponse = claimGenerationResponse({
+                    apiId: api.id || null,
+                    model: input.model,
+                    responseId: result?.responseId,
+                    requestId,
+                    taskId: activeTaskId
+                })
+                if (duplicateResponse) {
+                    const duplicateError = '中转站返回了已使用的生成响应，本次结果未保存。请核对服务商记录或切换中转站后再生成。'
+                    const details = {
+                        code: 'UPSTREAM_DUPLICATE_RESPONSE',
+                        error: duplicateError,
+                        upstreamRequestId: upstreamRequestId(result),
+                        previousRequestId: duplicateResponse.requestId,
+                        previousTaskId: duplicateResponse.taskId
+                    }
+                    await appendGenerationLog({...responseLog, ...details,
+                        status: 'upstream-response-error', httpStatus: response.status,
+                        upstream: diagnosticValue(result)
+                    })
+                    return send(res, 502, {requestId, ...details})
+                }
+                await appendGenerationLog({...responseLog, status: 'success-response'})
                 responses.push({
                     usage: result.usage || result.usageMetadata || null,
                     revisedPrompts: normalizedData.map((item) => item.revised_prompt).filter(Boolean)
