@@ -1805,10 +1805,15 @@ http.createServer(async (req, res) => {
                 const file = path.join(generatedDir, name)
                 const buffer = await fs.readFile(file)
                 const type = imageContentType(name)
+                const origin = req.headers.origin
+                const allowedOrigin = !origin || origin === 'null' || /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin)
+                    ? (origin || 'null')
+                    : 'null'
                 res.writeHead(200, {
                     'Content-Type': type,
                     'Cache-Control': 'public, max-age=31536000',
-                    'Access-Control-Allow-Origin': 'null'
+                    'Access-Control-Allow-Origin': allowedOrigin,
+                    'Vary': 'Origin'
                 })
                 return res.end(buffer)
             } catch {

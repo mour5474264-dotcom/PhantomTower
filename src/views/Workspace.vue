@@ -67,6 +67,9 @@ const HOME_MEMORY_STORE = 'workspace'
 const HOME_MEMORY_KEY = 'home'
 const HOME_MEMORY_VERSION = 1
 const MAX_REFERENCE_IMAGE_SIDE = 4096
+// Generated 4K images are valid outputs but are too large for some edit
+// endpoints when sent back as an input reference. Keep edit inputs at 1K scale.
+const MAX_EDIT_REFERENCE_IMAGE_SIDE = 1536
 const assetUploadCache = new WeakMap()
 let restoringHomeMemory = true
 let persistHomeMemoryTimer = 0
@@ -146,7 +149,7 @@ function imageUrlFromOutput(output) {
 
 function imageLoadsImmediately(url) {
   return /^data:image\//i.test(String(url || ''))
-    || /^https?:\/\/127\.0\.0\.1(?::\d+)?\/api\/generated\//i.test(String(url || ''))
+      || /^https?:\/\/127\.0\.0\.1(?::\d+)?\/api\/generated\//i.test(String(url || ''))
 }
 
 watch(error, (message) => {
@@ -302,7 +305,13 @@ const configStatusTitle = computed(() => {
 const configStatusType = computed(() => configLoading.value ? 'info' : 'warning')
 const materialTypes = [
   {key: 'person', label: '人物参考', step: '可选', hint: '用于固定人物身份、脸部与服装', limit: 3},
-  {key: 'reference', label: '目标 / 构图图', step: '任务', hint: '每张图片单独执行一次处理，可叠加背景和道具素材', limit: 30},
+  {
+    key: 'reference',
+    label: '目标 / 构图图',
+    step: '任务',
+    hint: '每张图片单独执行一次处理，可叠加背景和道具素材',
+    limit: 30
+  },
   {key: 'prop', label: '道具参考', step: '可选', hint: '用于影响每张目标图中的道具内容', limit: 30}
 ]
 
@@ -313,10 +322,29 @@ function normalizeConfigSelection() {
   if (selected?.upstreamName) activeWorkspaceName.value = selected.upstreamName
   if (!availableTemplates.value.some((item) => item.id === presetId.value)) presetId.value = ''
 }
+
 materialTypes.push({key: 'scene', label: '背景参考', step: '可选', hint: '用于影响每张目标图的背景与环境', limit: 30})
-materialTypes.push({key: 'pose', label: '动作模仿', step: '可选', hint: '上传后优先模仿动作与身体朝向；未上传则沿用目标图动作', limit: 1})
-materialTypes.push({key: 'batchReference', label: '画面参考图', step: '可选', hint: '用于统一参考色调、道具或画面氛围；请在提示词中说明要借用什么', limit: 1})
-materialTypes.push({key: 'editReference', label: '编辑参考图', step: '可选', hint: '用于参考指定道具、材质或画面风格；请在提示词中说明要借用什么', limit: 1})
+materialTypes.push({
+  key: 'pose',
+  label: '动作模仿',
+  step: '可选',
+  hint: '上传后优先模仿动作与身体朝向；未上传则沿用目标图动作',
+  limit: 1
+})
+materialTypes.push({
+  key: 'batchReference',
+  label: '画面参考图',
+  step: '可选',
+  hint: '用于统一参考色调、道具或画面氛围；请在提示词中说明要借用什么',
+  limit: 1
+})
+materialTypes.push({
+  key: 'editReference',
+  label: '编辑参考图',
+  step: '可选',
+  hint: '用于参考指定道具、材质或画面风格；请在提示词中说明要借用什么',
+  limit: 1
+})
 const activeMaterialTypes = computed(() => {
   const keys = {
     batch: ['person', 'reference', 'batchReference', 'pose', 'scene', 'prop'],
@@ -327,9 +355,11 @@ const activeMaterialTypes = computed(() => {
     edit: ['reference', 'editReference']
   }[imageOperation.value] || []
   return materialTypes.filter((item) => keys.includes(item.key)).map((item) => item.key === 'person' && imageOperation.value === 'batch'
-    ? {...item, limit: personReplaceVariant.value === 'single' ? 1 : 2,
-      hint: personReplaceVariant.value === 'single' ? '用于固定一个人物的身份、脸部与服装' : '按目标图位置固定两个人物的身份、脸部与服装'}
-    : item)
+      ? {
+        ...item, limit: personReplaceVariant.value === 'single' ? 1 : 2,
+        hint: personReplaceVariant.value === 'single' ? '用于固定一个人物的身份、脸部与服装' : '按目标图位置固定两个人物的身份、脸部与服装'
+      }
+      : item)
 })
 
 const geminiResolutionOptions = [
@@ -370,22 +400,23 @@ async function resolveGeminiAspectRatio(value, target) {
   if (!file) return '1:1'
   try {
     const dimensions = target?.width && target?.height
-      ? {width: target.width, height: target.height}
-      : await imageDimensions(file)
+        ? {width: target.width, height: target.height}
+        : await imageDimensions(file)
     return nearestGeminiAspectRatio(dimensions.width, dimensions.height)
   } catch {
     return '1:1'
   }
 }
+
 const selectedModel = computed(() => models.value.find((item) => item.id === model.value) || null)
 const selectedProtocol = computed(() => {
   const api = activeApiConfig.value
   const selected = selectedModel.value
   const route = selected || api?.modelRoutes?.[model.value] || api?.detectedRoute || {}
   return String(route.provider || api?.provider || '').toLowerCase() === 'gemini'
-      || String(route.protocol || '').toLowerCase() === 'gemini-generate-content'
-    ? 'gemini'
-    : 'openai'
+  || String(route.protocol || '').toLowerCase() === 'gemini-generate-content'
+      ? 'gemini'
+      : 'openai'
 })
 
 watch([model, selectedProtocol], () => {
@@ -455,7 +486,46 @@ function resultMemoryItem(item) {
     taskId: item.taskId || null,
     parentResultId: item.parentResultId || null,
     version: item.version || 1,
-    requestSnapshot: item.requestSnapshot || null
+    requestSnapshot: requestMemorySnapshot(item.requestSnapshot)
+  }
+}
+
+function requestMemorySnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') return null
+  // Vue proxies and UI-only material objects cannot always be structured
+  // cloned by IndexedDB. Retain only the request values needed for retry.
+  const text = (value) => typeof value === 'string' ? value : ''
+  return {
+    model: text(snapshot.model),
+    modelConfigId: text(snapshot.modelConfigId),
+    protocol: text(snapshot.protocol),
+    prompt: text(snapshot.prompt),
+    extraPrompt: text(snapshot.extraPrompt),
+    presetId: text(snapshot.presetId),
+    builtinVariant: text(snapshot.builtinVariant),
+    mode: text(snapshot.mode),
+    operation: text(snapshot.operation),
+    images: Array.isArray(snapshot.images) ? snapshot.images.filter((value) => typeof value === 'string') : [],
+    n: Number(snapshot.n) || 1,
+    size: text(snapshot.size),
+    quality: text(snapshot.quality),
+    format: text(snapshot.format),
+    resolution: text(snapshot.resolution),
+    aspectRatio: text(snapshot.aspectRatio),
+    mask: text(snapshot.mask),
+    maskStatus: text(snapshot.maskStatus),
+    taskId: text(snapshot.taskId),
+    parentResultId: text(snapshot.parentResultId) || null,
+    version: Number(snapshot.version) || 1
+  }
+}
+
+function editParentMemoryItem(item) {
+  if (!item || typeof item !== 'object') return null
+  return {
+    id: typeof item.id === 'string' ? item.id : null,
+    version: Number(item.version) || 1,
+    url: typeof item.url === 'string' ? item.url : ''
   }
 }
 
@@ -469,7 +539,10 @@ function restoreResultItem(item) {
     loading: false,
     status: hasImage ? 'completed' : item.status,
     imageLoading: Boolean(item?.url) && !imageLoadsImmediately(item.url),
-    task: item?.requestSnapshot ? {label: item.label || '样片', type: item.requestSnapshot.operation || item.requestSnapshot.mode || 'text'} : null
+    task: item?.requestSnapshot ? {
+      label: item.label || '样片',
+      type: item.requestSnapshot.operation || item.requestSnapshot.mode || 'text'
+    } : null
   }
 }
 
@@ -553,10 +626,10 @@ function makeHomeMemorySnapshot() {
       mode: mode.value,
       imageOperation: imageOperation.value,
       replaceObject: replaceObject.value,
-      editParent: editParent.value
+      editParent: editParentMemoryItem(editParent.value)
     },
     materials: Object.fromEntries(
-      Object.entries(materials.value).map(([key, items]) => [key, items.map(materialMemoryItem).filter(Boolean)])
+        Object.entries(materials.value).map(([key, items]) => [key, items.map(materialMemoryItem).filter(Boolean)])
     ),
     results: results.value.map(resultMemoryItem)
   }
@@ -574,8 +647,8 @@ async function restoreHomeMemory() {
     count.value = Number(form.count || 1)
     resolution.value = form.resolution || resolution.value
     aspectRatio.value = geminiAspectRatioOptions.some((option) => option.value === form.aspectRatio)
-      ? form.aspectRatio
-      : geminiAspectRatioOptions[0].value
+        ? form.aspectRatio
+        : geminiAspectRatioOptions[0].value
     format.value = form.format || format.value
     size.value = form.size || size.value
     customWidth.value = form.customWidth ? Number(form.customWidth) : null
@@ -750,6 +823,21 @@ async function resizeImageFile(file, width, height) {
   }
 }
 
+async function prepareEditReferenceFile(file) {
+  const dimensions = await imageDimensions(file)
+  const longSide = Math.max(dimensions.width, dimensions.height)
+  if (longSide <= MAX_EDIT_REFERENCE_IMAGE_SIDE) return {
+    file,
+    width: dimensions.width,
+    height: dimensions.height,
+    resized: false
+  }
+  const scale = MAX_EDIT_REFERENCE_IMAGE_SIDE / longSide
+  const width = Math.max(1, Math.round(dimensions.width * scale))
+  const height = Math.max(1, Math.round(dimensions.height * scale))
+  return {file: await resizeImageFile(file, width, height), width, height, resized: true}
+}
+
 async function addFiles(key, upload) {
   const file = rawFile(upload);
   if (!file || !file.type?.startsWith('image/')) return;
@@ -777,7 +865,14 @@ async function addFiles(key, upload) {
     return;
   }
   if (materials.value[key].some((item) => item.name === preparedFile.name && item.size === preparedFile.size)) return;
-  materials.value[key].push(markRaw({file: preparedFile, name: preparedFile.name, size: preparedFile.size, width, height, previewUrl: URL.createObjectURL(preparedFile)}))
+  materials.value[key].push(markRaw({
+    file: preparedFile,
+    name: preparedFile.name,
+    size: preparedFile.size,
+    width,
+    height,
+    previewUrl: URL.createObjectURL(preparedFile)
+  }))
 }
 
 function removeFile(key, index) {
@@ -819,8 +914,8 @@ async function refresh(options = {}) {
     if (modelsResult.status === 'fulfilled') {
       models.value = modelsResult.value || []
       const preferredModel = settings?.activeModelId && models.value.some((item) => item.id === settings.activeModelId)
-        ? settings.activeModelId
-        : (activeApi?.model && models.value.some((item) => item.modelName === activeApi.model) ? models.value.find((item) => item.modelName === activeApi.model)?.id : '')
+          ? settings.activeModelId
+          : (activeApi?.model && models.value.some((item) => item.modelName === activeApi.model) ? models.value.find((item) => item.modelName === activeApi.model)?.id : '')
       model.value = preferredModel || (models.value.some((item) => item.id === model.value) ? model.value : models.value[0]?.id || '')
       const selected = models.value.find((item) => item.id === model.value)
       if (selected?.upstreamId) activeApiConfig.value = settings?.apis?.find((item) => item.id === selected.upstreamId) || activeApiConfig.value
@@ -924,7 +1019,10 @@ function buildImageTasks() {
     return materials.value.reference.map((item, index) => ({
       // The target must be the first physical image: several image models use
       // the first input as the editing canvas despite the textual role labels.
-      item, type: 'reference', label: `逐张处理 ${index + 1}`, materialKeys: ['reference', 'batchReference', 'person', 'pose', 'scene', 'prop']
+      item,
+      type: 'reference',
+      label: `逐张处理 ${index + 1}`,
+      materialKeys: ['reference', 'batchReference', 'person', 'pose', 'scene', 'prop']
     }))
   }
   if (imageOperation.value === 'three-view') {
@@ -980,8 +1078,8 @@ function buildMaterialPrompt(labeled, taskType = 'text', taskLabel = '提示词�
                                   : '只根据补充提示词为人物参考中的同一人物创建一个新变化。';
   const batchMaterialRule = taskType === 'reference' ? [
     labeled.some((item) => item.role === 'pose_reference')
-      ? '动作模仿图是本次动作的唯一优先来源：严格模仿其中人物的姿势、肢体关系和身体朝向，但不得带入动作图人物的身份、脸部、服装、道具或背景；此时不要以目标图中的原动作覆盖动作模仿图。'
-      : '未上传动作模仿图时，保持并参考目标图中的原有动作、肢体关系和身体朝向。',
+        ? '动作模仿图是本次动作的唯一优先来源：严格模仿其中人物的姿势、肢体关系和身体朝向，但不得带入动作图人物的身份、脸部、服装、道具或背景；此时不要以目标图中的原动作覆盖动作模仿图。'
+        : '未上传动作模仿图时，保持并参考目标图中的原有动作、肢体关系和身体朝向。',
     labeled.some((item) => item.role === 'scene_reference') && '背景参考图是必须使用的视觉来源：将背景图中可辨识的场景、地点、室内外环境、主要背景物体、色调和氛围融入主目标图背景，不得忽略或以无关背景替代。',
     labeled.some((item) => item.role === 'prop_reference') && '道具图是必须使用的视觉来源：在主目标图中清晰呈现道具图里的主要道具，保留其可辨识的外形、材质、颜色和关键细节，并使其与人物或画面自然接触；不得省略、替换为其他道具或只保留相似概念。',
     labeled.some((item) => item.role === 'visual_reference') && '画面参考图不是另一张待处理的目标图，也不得整张覆盖或合成到当前目标图。它只提供用户在补充提示词中明确指定的视觉特征，例如色调、光线、氛围、道具或材质。每一张目标图都应独立应用这些明确要求，同时保持各自未指定的主体、构图、位置、透视和内容不变；未明确要求时不得擅自借用参考图的其他主体或背景。'
@@ -1037,7 +1135,7 @@ function createGenerationWork() {
     aspectRatio: aspectRatio.value
   }
   const materialSnapshot = Object.fromEntries(
-    Object.entries(materials.value).map(([key, items]) => [key, [...items]])
+      Object.entries(materials.value).map(([key, items]) => [key, [...items]])
   )
   const jobs = tasks.flatMap((task) =>
       Array.from({length: count.value}, (_, copyIndex) => ({task, copyIndex, taskId: crypto.randomUUID()}))
@@ -1128,29 +1226,29 @@ async function runGeneration(work) {
       const abortHandler = () => controller.abort()
       workController.signal.addEventListener('abort', abortHandler, {once: true})
       const requestSnapshot = {
-          model: work.requestConfig.model,
-          modelConfigId: work.requestConfig.modelConfigId,
-          protocol: work.requestConfig.protocol,
-          prompt: buildMaterialPrompt(labeled, task.type, task.label, work.requestConfig.replaceObject, selectedTemplate?.systemPrompt || ''),
-          extraPrompt: work.requestConfig.prompt,
-          presetId: work.requestConfig.presetId,
-          builtinVariant: work.requestConfig.builtinVariant,
-          mode: work.requestConfig.mode,
-          images: labeled.map((item) => item.data),
-          materials: labeled,
-          n: 1,
-          ...(prepared.requestSize ? {size: prepared.requestSize} : {}),
-          quality: work.requestConfig.quality,
-          format: work.requestConfig.format,
-          resolution: work.requestConfig.resolution,
-          aspectRatio: prepared.aspectRatio || work.requestConfig.aspectRatio,
-          mask: prepared.mask,
-          maskStatus: prepared.maskStatus,
-          taskId,
-          parentResultId: task.type === 'local-edit' ? editParent.value?.id || null : null,
-          version: task.type === 'local-edit' ? Number(editParent.value?.version || 0) + 1 : 1,
-          operation: task.type,
-           debug: false
+        model: work.requestConfig.model,
+        modelConfigId: work.requestConfig.modelConfigId,
+        protocol: work.requestConfig.protocol,
+        prompt: buildMaterialPrompt(labeled, task.type, task.label, work.requestConfig.replaceObject, selectedTemplate?.systemPrompt || ''),
+        extraPrompt: work.requestConfig.prompt,
+        presetId: work.requestConfig.presetId,
+        builtinVariant: work.requestConfig.builtinVariant,
+        mode: work.requestConfig.mode,
+        images: labeled.map((item) => item.data),
+        materials: labeled,
+        n: 1,
+        ...(prepared.requestSize ? {size: prepared.requestSize} : {}),
+        quality: work.requestConfig.quality,
+        format: work.requestConfig.format,
+        resolution: work.requestConfig.resolution,
+        aspectRatio: prepared.aspectRatio || work.requestConfig.aspectRatio,
+        mask: prepared.mask,
+        maskStatus: prepared.maskStatus,
+        taskId,
+        parentResultId: task.type === 'local-edit' ? editParent.value?.id || null : null,
+        version: task.type === 'local-edit' ? Number(editParent.value?.version || 0) + 1 : 1,
+        operation: task.type,
+        debug: false
       }
       const startedIndex = currentResultIndex()
       if (startedIndex >= 0) results.value[startedIndex] = {
@@ -1184,7 +1282,13 @@ async function runGeneration(work) {
         if (e.name !== 'AbortError' && !controller.signal.aborted && !workController.signal.aborted) {
           error.value = generationErrorSummary(e)
           const failedIndex = currentResultIndex()
-          if (failedIndex >= 0) results.value[failedIndex] = {...results.value[failedIndex], loading: false, status: e.details?.generationAcceptedUnknown ? 'uncertain' : 'failed', uncertain: Boolean(e.details?.generationAcceptedUnknown), error: generationErrorSummary(e)}
+          if (failedIndex >= 0) results.value[failedIndex] = {
+            ...results.value[failedIndex],
+            loading: false,
+            status: e.details?.generationAcceptedUnknown ? 'uncertain' : 'failed',
+            uncertain: Boolean(e.details?.generationAcceptedUnknown),
+            error: generationErrorSummary(e)
+          }
         }
       } finally {
         completedCount.value += 1
@@ -1204,7 +1308,13 @@ async function runGeneration(work) {
   } catch (e) {
     if (e.name !== 'AbortError') error.value = generationErrorSummary(e);
     results.value.slice(work.resultStart, work.resultStart + work.jobs.length).forEach((item, offset) => {
-      if (item?.loading) results.value[work.resultStart + offset] = {...item, loading: false, status: e.details?.generationAcceptedUnknown ? 'uncertain' : 'failed', uncertain: Boolean(e.details?.generationAcceptedUnknown), error: generationErrorSummary(e)}
+      if (item?.loading) results.value[work.resultStart + offset] = {
+        ...item,
+        loading: false,
+        status: e.details?.generationAcceptedUnknown ? 'uncertain' : 'failed',
+        uncertain: Boolean(e.details?.generationAcceptedUnknown),
+        error: generationErrorSummary(e)
+      }
     })
   } finally {
     work.controller = null
@@ -1238,8 +1348,8 @@ async function stop() {
   queuedCount.value = 0
   running.value = false;
   results.value = results.value.map((item) => item.loading
-    ? {...item, loading: false, status: 'stopped', error: ''}
-    : item)
+      ? {...item, loading: false, status: 'stopped', error: ''}
+      : item)
   error.value = ''
   void Promise.all(taskIds.map((taskId) => cancelGeneration(taskId).catch(() => null)))
 }
@@ -1303,22 +1413,27 @@ async function continueEdit() {
   try {
     error.value = ''
     const prepared = await prepareEditImage(result.url)
-    const response = await fetch(prepared.url, {credentials: 'include'})
+    const response = await fetch(prepared.url, {credentials: 'omit', cache: 'no-store'})
     if (!response.ok) throw new Error('无法读取已选样片')
     const blob = await response.blob()
-    const file = new File([blob], `sample-${Date.now()}.${format.value}`, {type: blob.type || 'image/png'})
+    const sourceFile = new File([blob], `sample-${Date.now()}.${format.value}`, {type: blob.type || 'image/png'})
+    const preparedFile = await prepareEditReferenceFile(sourceFile)
+
     Object.keys(materials.value).forEach(clearMaterialBucket)
     materials.value.reference = [markRaw({
-      file,
-      name: file.name,
-      size: file.size,
-      previewUrl: URL.createObjectURL(file)
+      file: preparedFile.file,
+      name: preparedFile.file.name,
+      size: preparedFile.file.size,
+      width: preparedFile.width,
+      height: preparedFile.height,
+      previewUrl: URL.createObjectURL(preparedFile.file)
     })]
     mode.value = 'image'
     imageOperation.value = 'edit'
     editParent.value = result
     prompt.value = ''
     size.value = '1024x1024'
+    resolution.value = '1K'
     presetId.value = ''
     selected.value = new Set()
     showMessage('success', '已将选中样片设为编辑基础图')
@@ -1336,21 +1451,25 @@ async function restoreHistoryEdit() {
   try {
     const source = JSON.parse(saved)
     const prepared = await prepareEditImage(source.url)
-    const response = await fetch(prepared.url, {credentials: 'include'})
+    const response = await fetch(prepared.url, {credentials: 'omit', cache: 'no-store'})
     if (!response.ok) throw new Error('无法读取历史样片')
     const blob = await response.blob()
-    const file = new File([blob], `sample-${Date.now()}.${format.value}`, {type: blob.type || 'image/png'})
+    const sourceFile = new File([blob], `sample-${Date.now()}.${format.value}`, {type: blob.type || 'image/png'})
+    const preparedFile = await prepareEditReferenceFile(sourceFile)
     Object.keys(materials.value).forEach(clearMaterialBucket)
     materials.value.reference = [markRaw({
-      file,
-      name: file.name,
-      size: file.size,
-      previewUrl: URL.createObjectURL(file)
+      file: preparedFile.file,
+      name: preparedFile.file.name,
+      size: preparedFile.file.size,
+      width: preparedFile.width,
+      height: preparedFile.height,
+      previewUrl: URL.createObjectURL(preparedFile.file)
     })]
     mode.value = 'image';
     imageOperation.value = 'edit';
     editParent.value = source;
     size.value = '1024x1024'
+    resolution.value = '1K'
   } catch (exception) {
     error.value = formatApiError(exception, '无法读取历史样片')
   }
@@ -1397,13 +1516,22 @@ async function retry(index) {
       parentResultId: output?.parentResultId || null,
       version: output?.version || 1,
       requestSnapshot,
-      task: item.task || {type: requestSnapshot.operation || requestSnapshot.mode || 'text', label: item.label || '样片'}
+      task: item.task || {
+        type: requestSnapshot.operation || requestSnapshot.mode || 'text',
+        label: item.label || '样片'
+      }
     }
   } catch (e) {
     if (e.name === 'AbortError') {
       results.value[index] = {...results.value[index], loading: false, status: 'stopped', error: ''}
     } else {
-      results.value[index] = {...results.value[index], loading: false, status: e.details?.generationAcceptedUnknown ? 'uncertain' : 'failed', uncertain: Boolean(e.details?.generationAcceptedUnknown), error: generationErrorSummary(e)}
+      results.value[index] = {
+        ...results.value[index],
+        loading: false,
+        status: e.details?.generationAcceptedUnknown ? 'uncertain' : 'failed',
+        uncertain: Boolean(e.details?.generationAcceptedUnknown),
+        error: generationErrorSummary(e)
+      }
       error.value = generationErrorSummary(e)
     }
   } finally {
@@ -1577,9 +1705,9 @@ onBeforeUnmount(() => {
                                 @change="setImageOperation">
                   <el-radio-button label="batch">逐张批处理</el-radio-button>
                   <el-radio-button label="three-view">三视图</el-radio-button>
-<!--                  <el-radio-button label="fusion">多图融合</el-radio-button>-->
-<!--                  <el-radio-button label="background">背景替换</el-radio-button>-->
-<!--                  <el-radio-button label="prop">道具替换</el-radio-button>-->
+                  <!--                  <el-radio-button label="fusion">多图融合</el-radio-button>-->
+                  <!--                  <el-radio-button label="background">背景替换</el-radio-button>-->
+                  <!--                  <el-radio-button label="prop">道具替换</el-radio-button>-->
                   <el-radio-button label="edit">局部继续编辑</el-radio-button>
                 </el-radio-group>
               </el-form-item>
@@ -1591,7 +1719,9 @@ onBeforeUnmount(() => {
                   <el-radio-button label="single">单人替换</el-radio-button>
                   <el-radio-button label="double">双人替换</el-radio-button>
                 </el-radio-group>
-                <small class="control-hint">{{ personReplaceVariant === 'single' ? '替换目标图中的一个人物，最多使用 1 张人物参考图。' : '按目标图中的位置逐一替换两个人物，最多使用 2 张人物参考图。' }}</small>
+                <small class="control-hint">{{
+                    personReplaceVariant === 'single' ? '替换目标图中的一个人物，最多使用 1 张人物参考图。' : '按目标图中的位置逐一替换两个人物，最多使用 2 张人物参考图。'
+                  }}</small>
               </el-form-item>
               <div v-for="item in activeMaterialTypes" :key="item.key" class="material-box"
                    :class="{ 'is-primary': item.required, 'has-files': materials[item.key].length }">
@@ -1641,31 +1771,51 @@ onBeforeUnmount(() => {
             </div>
             <div class="quick-controls" aria-label="常用生成设置">
               <el-form-item class="quick-control quick-model" label="模型">
-                <el-select v-model="model" class="studio-select" filterable allow-create default-first-option :placeholder="configLoading ? '正在加载模型...' : '选择模型，可直接输入模型 ID'" popper-class="studio-select-popper" clearable :loading="configLoading">
-                  <el-option v-for="(item, index) in models" :key="item.id" :label="item.upstreamName ? ` ${item.name || item.modelName}` : (item.name || item.modelName || item.id)" :value="item.id">
-                    <div class="select-option"><span class="select-index">{{ String(index + 1).padStart(2, '0') }}</span><span><b>{{ item.upstreamName ? ` ${item.name || item.modelName}` : (item.name || item.modelName || item.id) }}</b><small>{{ item.modelName && item.modelName !== item.name ? item.modelName : (item.supportedSizes?.length ? `支持 ${item.supportedSizes.join('、')}` : (index === 0 ? '主力生成模型' : '备用生成模型')) }}</small></span></div>
+                <el-select v-model="model" class="studio-select" filterable allow-create default-first-option
+                           :placeholder="configLoading ? '正在加载模型...' : '选择模型，可直接输入模型 ID'"
+                           popper-class="studio-select-popper" clearable :loading="configLoading">
+                  <el-option v-for="(item, index) in models" :key="item.id"
+                             :label="item.upstreamName ? ` ${item.name || item.modelName}` : (item.name || item.modelName || item.id)"
+                             :value="item.id">
+                    <div class="select-option"><span class="select-index">{{
+                        String(index + 1).padStart(2, '0')
+                      }}</span><span><b>{{
+                        item.upstreamName ? ` ${item.name || item.modelName}` : (item.name || item.modelName || item.id)
+                      }}</b><small>{{
+                        item.modelName && item.modelName !== item.name ? item.modelName : (item.supportedSizes?.length ? `支持 ${item.supportedSizes.join('、')}` : (index === 0 ? '主力生成模型' : '备用生成模型'))
+                      }}</small></span></div>
                   </el-option>
                 </el-select>
               </el-form-item>
-              <el-button class="quick-refresh" text :icon="Refresh" title="刷新模型" aria-label="刷新模型" @click="refresh" :disabled="running"/>
+              <el-button class="quick-refresh" text :icon="Refresh" title="刷新模型" aria-label="刷新模型"
+                         @click="refresh" :disabled="running"/>
               <el-form-item class="quick-control quick-preset" label="预设">
-                <el-select v-model="presetId" class="studio-select" filterable :placeholder="configLoading ? '正在加载预设...' : '未选择预设'" popper-class="studio-select-popper" :loading="configLoading" clearable>
-                  <el-option v-for="(item, index) in availableTemplates" :key="item.id" :label="item.name" :value="item.id">
-                    <div class="select-option"><span class="select-index">{{ String(index + 1).padStart(2, '0') }}</span><span><b>{{ item.name }}</b></span></div>
+                <el-select v-model="presetId" class="studio-select" filterable
+                           :placeholder="configLoading ? '正在加载预设...' : '未选择预设'"
+                           popper-class="studio-select-popper" :loading="configLoading" clearable>
+                  <el-option v-for="(item, index) in availableTemplates" :key="item.id" :label="item.name"
+                             :value="item.id">
+                    <div class="select-option"><span class="select-index">{{
+                        String(index + 1).padStart(2, '0')
+                      }}</span><span><b>{{ item.name }}</b></span></div>
                   </el-option>
                 </el-select>
               </el-form-item>
               <el-form-item class="quick-control quick-size" label="分辨率">
                 <el-select v-model="resolution" class="studio-select" popper-class="studio-select-popper">
-                  <el-option v-for="option in geminiResolutionOptions" :key="option.value" :label="option.label" :value="option.value"/>
+                  <el-option v-for="option in geminiResolutionOptions" :key="option.value" :label="option.label"
+                             :value="option.value"/>
                 </el-select>
               </el-form-item>
               <el-form-item class="quick-control quick-size" label="宽高比">
                 <el-select v-model="aspectRatio" class="studio-select" popper-class="studio-select-popper">
-                  <el-option v-for="option in geminiAspectRatioOptions" :key="option.value" :label="option.label" :value="option.value"/>
+                  <el-option v-for="option in geminiAspectRatioOptions" :key="option.value" :label="option.label"
+                             :value="option.value"/>
                 </el-select>
               </el-form-item>
-              <el-form-item class="quick-control quick-count" label="数量"><el-input-number v-model="count" :min="1" :max="10" controls-position="right"/></el-form-item>
+              <el-form-item class="quick-control quick-count" label="数量">
+                <el-input-number v-model="count" :min="1" :max="10" controls-position="right"/>
+              </el-form-item>
             </div>
             <div class="prompt-surface" :class="{ 'is-resizing': promptResizeActive }">
               <button type="button" class="prompt-resize-handle" role="separator"
@@ -1680,8 +1830,16 @@ onBeforeUnmount(() => {
               </el-form-item>
               <div class="task-action-bar">
                 <el-button class="clear-button" @click="clearCurrent">清空当前</el-button>
-                <el-button type="primary" :icon="VideoPlay" @click="generate">{{ running ? '追加生成' : '开始生成' }}</el-button>
-                <button v-if="running" type="button" class="stop-generation-button" @click="stop"><el-icon><SwitchButton/></el-icon>停止生成</button>
+                <el-button type="primary" :icon="VideoPlay" @click="generate">{{
+                    running ? '追加生成' : '开始生成'
+                  }}
+                </el-button>
+                <button v-if="running" type="button" class="stop-generation-button" @click="stop">
+                  <el-icon>
+                    <SwitchButton/>
+                  </el-icon>
+                  停止生成
+                </button>
               </div>
             </div>
             <section class="config-summary" aria-live="polite">
@@ -1711,13 +1869,18 @@ onBeforeUnmount(() => {
             {{ allResultsSelected ? '取消全选' : '全选' }}
           </el-button>
           <el-button :icon="Delete" plain :disabled="!selectedRemovableCount"
-                     @click="removeSelected">删除已选 </el-button>
+                     @click="removeSelected">删除已选
+          </el-button>
           <el-button :icon="SwitchButton" plain :disabled="!selectedLoadingCount || !running"
-                     @click="stopSelected">停止已选 </el-button>
+                     @click="stopSelected">停止已选
+          </el-button>
           <el-button :icon="Download" :loading="exporting" :disabled="!selected.size || exporting || preparingEdit"
-                     @click="exportSelected">导出已选 </el-button>
-          <el-button :icon="PenLine" :loading="preparingEdit" :disabled="selected.size !== 1 || running || preparingEdit"
-                     @click="continueEdit">{{ preparingEdit ? '准备编辑图' : '继续编辑' }}</el-button>
+                     @click="exportSelected">导出已选
+          </el-button>
+          <el-button :icon="PenLine" :loading="preparingEdit"
+                     :disabled="selected.size !== 1 || running || preparingEdit"
+                     @click="continueEdit">{{ preparingEdit ? '准备编辑图' : '继续编辑' }}
+          </el-button>
         </div>
       </div>
       <div v-if="!results.length" class="empty">暂无生成结果</div>
@@ -1725,7 +1888,9 @@ onBeforeUnmount(() => {
         <div v-for="(item,index) in results" :key="item.id || index" class="result-card"
              :class="{ selected: selected.has(index) }">
           <div v-if="item.loading && !item.url" class="loading-placeholder">
-            <span>{{ item.status === 'preparing' ? '正在准备素材...' : item.status === 'generating' ? '正在加载图片...' : '等待生成' }}</span>
+            <span>{{
+                item.status === 'preparing' ? '正在准备素材...' : item.status === 'generating' ? '正在加载图片...' : '等待生成'
+              }}</span>
             <b>样片 {{ index + 1 }}</b>
 
             <el-button v-if="item.taskId" size="small" :icon="SwitchButton" @click="stopOne(index)">停止</el-button>
@@ -1745,12 +1910,15 @@ onBeforeUnmount(() => {
           </template>
           <div v-else-if="item.status === 'stopped'" class="result-stopped">
             <strong>已停止生成</strong>
-            <el-button v-if="item.task || item.requestSnapshot" size="small" :icon="Refresh" @click="retry(index)">重试</el-button>
+            <el-button v-if="item.task || item.requestSnapshot" size="small" :icon="Refresh" @click="retry(index)">
+              重试
+            </el-button>
           </div>
           <div v-else-if="item.error" class="result-error" :class="{ 'result-uncertain': item.uncertain }">
             <strong>{{ item.uncertain ? '结果待确认' : '生成失败' }}</strong>
             <span>{{ item.error }}</span>
-            <el-button v-if="item.task && !item.uncertain" size="small" :icon="Refresh" @click="retry(index)">重试</el-button>
+            <el-button v-if="item.task && !item.uncertain" size="small" :icon="Refresh" @click="retry(index)">重试
+            </el-button>
           </div>
           <div v-else class="result-error">
             <strong>未生成图片</strong>

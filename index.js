@@ -367,7 +367,10 @@ http.createServer(async (req, res) => {
                     model: input.model,
                     prompt: input.prompt,
                     n: 1,
-                    quality: 'high',
+                    // Keep the upstream output tier aligned with the UI. In
+                    // particular, continue-edit requests are downgraded to
+                    // 1K after their reference image is downsampled.
+                    quality: input.resolution === '1K' ? 'standard' : input.resolution === '2K' ? 'medium' : 'high',
                     response_format: 'url'
                 }
                 if (input.size && input.size !== 'auto') payload.size = input.size
