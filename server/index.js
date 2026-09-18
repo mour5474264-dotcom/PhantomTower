@@ -7,6 +7,8 @@ import net from 'node:net'
 import {fileURLToPath} from 'node:url'
 import {createPersonMask, visionStatus, parseDataUrl} from './vision/index.js'
 import {createGenerationResponseGuard} from './generation-response-guard.js'
+import {createCanvasGenerationHandler} from './canvas-generation.js'
+import {createVideoGenerationHandler} from './video-generation.js'
 
 const dataDir = process.env.PHANTOMTOWER_DATA_DIR || path.join(path.dirname(fileURLToPath(import.meta.url)), '../data')
 const generatedDir = path.join(dataDir, 'generated')
@@ -1588,6 +1590,8 @@ await repairStoredImageExtensions()
 
 // The renderer and persisted local URLs use this fixed application port.
 const serverPort = 4317
+const handleVideoGeneration = createVideoGenerationHandler({apiForModel, configuredModelFor, routeForModel, apiUrl, geminiEndpointRoot, protocolHeaders, json, multipartForm, send})
+const handleCanvasGeneration = createCanvasGenerationHandler({apiForModel, configuredModelFor, routeForModel, apiUrl, geminiEndpointRoot, protocolHeaders, json, multipartForm, send})
 http.createServer(async (req, res) => {
     res.req = req
     if (req.method === 'OPTIONS') {
@@ -1620,23 +1624,8 @@ http.createServer(async (req, res) => {
             })
             return send(res, 200, {ok: true})
         }
-        if (req.url === '/api/canvas/video' && req.method === 'POST') {
-            const api = await activeApi()
-            if (!api) return send(res, 400, {error: '请先配置并启用 API', code: 'API_NOT_CONFIGURED'})
-            return proxyCanvasUpstream(req, res, apiUrl(api.endpoint, 'videos'), {headers: {'Content-Type': String(req.headers['content-type'] || 'application/octet-stream')}})
-        }
-        const canvasVideoMatch = req.url.match(/^\/api\/canvas\/video\/([^/?]+)(\/content)?$/)
-        if (canvasVideoMatch && req.method === 'GET') {
-            const api = await activeApi()
-            if (!api) return send(res, 400, {error: '请先配置并启用 API', code: 'API_NOT_CONFIGURED'})
-            const suffix = canvasVideoMatch[2] ? '/content' : ''
-            return proxyCanvasUpstream(req, res, apiUrl(api.endpoint, `videos/${encodeURIComponent(canvasVideoMatch[1])}${suffix}`))
-        }
-        if (req.url === '/api/canvas/audio' && req.method === 'POST') {
-            const api = await activeApi()
-            if (!api) return send(res, 400, {error: '请先配置并启用 API', code: 'API_NOT_CONFIGURED'})
-            return proxyCanvasUpstream(req, res, apiUrl(api.endpoint, 'audio/speech'), {headers: {'Content-Type': 'application/json'}})
-        }
+        if (await handleVideoGeneration(req, res)) return
+        if (await handleCanvasGeneration(req, res)) return
         if (req.url === '/api/vision/status' && req.method === 'GET') return send(res, 200, await visionStatus())
         if (req.url === '/api/assets/upload' && req.method === 'POST') {
             const form = await multipartForm(req)

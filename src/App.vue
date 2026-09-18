@@ -1,7 +1,7 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { RouterLink, RouterView, useRoute } from 'vue-router'
-import { Images, Settings2, Server, History, SlidersHorizontal, ChevronDown, Grid2X2 } from 'lucide-vue-next'
+import { Images, Settings2, Server, History, SlidersHorizontal, ChevronDown, Grid2X2, Video } from 'lucide-vue-next'
 import { ElConfigProvider } from 'element-plus'
 import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import { getSettings, saveSettings, notifyActiveApiChanged } from './api'
@@ -130,6 +130,7 @@ onUnmounted(() => {
     <div class="brand"><span class="mark">S</span><div><b>样片工厂</b><small>Sample Factory</small></div></div>
     <nav aria-label="功能导航">
       <RouterLink to="/"><Images :size="17" />创作工作台</RouterLink>
+      <RouterLink to="/video"><Video :size="17" />视频生成</RouterLink>
       <RouterLink to="/presets"><Settings2 :size="17" />提示词预设</RouterLink>
       <RouterLink to="/history"><History :size="17" />生成记录</RouterLink>
       <RouterLink to="/canvas"><Grid2X2 :size="17" />无限画布</RouterLink>
