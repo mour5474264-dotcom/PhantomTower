@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>样片工厂 · 工作台原型</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+  <script src="https://unpkg.com/lucide@latest"></script>
+  <style>
+    :root {
+      --ink: #171a1b;
+      --muted: #77807d;
+      --line: #d9dfda;
+      --canvas: #f3f5f1;
+      --panel: #fbfcfa;
+      --lime: #d8f36a;
+      --coral: #ef7e61;
+      --blue: #8299f4;
+      --dark: #202525;
+      --shadow: 0 18px 50px rgba(26, 35, 31, .11);
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-width: 320px; color: var(--ink); background: var(--canvas); font-family: 'DM Sans', sans-serif; }
+    button, textarea, select { font: inherit; }
+    button { cursor: pointer; }
+    .app { min-height: 100vh; display: grid; grid-template-columns: 76px 1fr; }
+    .rail { position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; align-items: center; padding: 20px 12px; background: var(--dark); color: #d8e2dc; z-index: 4; }
+    .logo { width: 40px; height: 40px; display: grid; place-items: center; margin-bottom: 42px; border-radius: 12px 12px 12px 4px; color: var(--dark); background: var(--lime); font: 700 20px 'Space Grotesk'; box-shadow: 0 0 0 5px rgba(216,243,106,.08); }
+    .rail-nav { display: grid; gap: 10px; width: 100%; }
+    .rail-btn { position: relative; width: 100%; height: 44px; display: grid; place-items: center; border: 0; border-radius: 11px; color: #8f9a94; background: transparent; transition: color .2s, background .2s, transform .2s; }
+    .rail-btn:hover, .rail-btn.active { color: var(--lime); background: #303836; transform: translateY(-2px); }
+    .rail-btn.active::before { content: ''; position: absolute; left: -12px; width: 3px; height: 20px; border-radius: 0 3px 3px 0; background: var(--lime); }
+    .rail-bottom { margin-top: auto; display: grid; gap: 10px; }
+    .workspace { min-width: 0; }
+    .topbar { height: 76px; display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 0 34px; border-bottom: 1px solid var(--line); background: rgba(251,252,250,.85); backdrop-filter: blur(14px); position: sticky; top: 0; z-index: 3; }
+    .crumb { display: flex; align-items: center; gap: 11px; }
+    .crumb strong { font: 600 18px 'Space Grotesk'; letter-spacing: -.4px; }
+    .crumb span { color: #9aa39e; font-size: 13px; }
+    .top-actions { display: flex; align-items: center; gap: 10px; }
+    .icon-btn { width: 38px; height: 38px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 10px; color: #66716b; background: var(--panel); transition: .2s; }
+    .icon-btn:hover { color: var(--ink); border-color: #abb8b0; transform: translateY(-2px); }
+    .api-pill { display: flex; align-items: center; gap: 8px; height: 38px; padding: 0 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); font-size: 12px; font-weight: 600; }
+    .api-dot { width: 7px; height: 7px; border-radius: 50%; background: #5bc37a; box-shadow: 0 0 0 4px rgba(91,195,122,.14); }
+    .content { display: grid; grid-template-columns: 292px minmax(0, 1fr) 354px; min-height: calc(100vh - 76px); }
+    .setup { min-width: 0; padding: 22px 18px 28px; border-right: 1px solid var(--line); background: #eef2ed; }
+    .new-task { width: 100%; height: 42px; display: flex; align-items: center; justify-content: center; gap: 8px; border: 1px solid #c9d5c8; border-radius: 10px; color: #39443d; background: #f8faf6; font-size: 12px; font-weight: 700; transition: .2s; }
+    .new-task:hover { border-color: #aebaad; background: #fff; transform: translateY(-2px); }
+    .setup-heading { display: flex; align-items: end; justify-content: space-between; margin: 24px 0 11px; }
+    .setup-heading h2 { margin: 0; font: 600 16px 'Space Grotesk'; }
+    .setup-heading small { color: #8d9991; font: 10px 'DM Mono'; }
+    .mode-tabs, .operation-tabs { display: grid; gap: 3px; padding: 3px; border-radius: 10px; background: #e2e9e1; }
+    .mode-tabs { grid-template-columns: 1fr 1fr; }
+    .operation-tabs { grid-template-columns: repeat(3, 1fr); }
+    .mode-tabs button, .operation-tabs button { border: 0; border-radius: 7px; color: #7d8981; background: transparent; font-size: 11px; transition: .2s; }
+    .mode-tabs button { height: 34px; }
+    .operation-tabs button { min-height: 39px; padding: 5px 3px; line-height: 1.2; }
+    .mode-tabs button.active, .operation-tabs button.active { color: var(--ink); background: #fff; box-shadow: 0 2px 8px rgba(25,35,29,.08); }
+    .setup-hint { margin: 9px 2px 15px; color: #8a968d; font-size: 10px; line-height: 1.5; }
+    .material-list { display: grid; gap: 9px; margin-top: 14px; }
+    .material-box { padding: 11px; border: 1px solid #d2ddd3; border-radius: 11px; background: #f8faf7; transition: .2s; }
+    .material-box:hover, .material-box.has-files { border-color: #bbcdb9; box-shadow: 0 6px 16px rgba(40,60,43,.06); }
+    .material-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .material-heading strong { display: block; font-size: 11px; }
+    .material-heading small { display: block; margin-top: 3px; color: #9aa59e; font-size: 9px; }
+    .material-count { color: #7b8b7c; font: 10px 'DM Mono'; }
+    .material-count b { color: #a5b0a6; font-weight: 400; }
+    .material-body { display: flex; align-items: center; gap: 7px; margin-top: 9px; }
+    .material-add { flex: 1; min-width: 0; height: 39px; display: flex; align-items: center; justify-content: center; gap: 6px; border: 1px dashed #b8c6b8; border-radius: 8px; color: #819083; background: #fff; font-size: 10px; transition: .2s; }
+    .material-add:hover { color: var(--ink); border-color: #90a991; background: #f1f8e9; }
+    .thumb { position: relative; width: 39px; height: 39px; flex: 0 0 39px; overflow: hidden; border-radius: 7px; background: #c4cfc6; }
+    .thumb img { width: 100%; height: 100%; object-fit: cover; }
+    .thumb button { position: absolute; top: 2px; right: 2px; width: 15px; height: 15px; display: grid; place-items: center; border: 0; border-radius: 50%; color: #fff; background: rgba(20,30,24,.75); }
+    .material-footer { display: flex; justify-content: space-between; margin-top: 7px; color: #a0aaa2; font: 9px 'DM Mono'; }
+    .operation-note { margin: 10px 0 0; padding: 9px; border-left: 2px solid #b9c8b4; color: #7f8d82; background: #f3f7f1; font-size: 10px; line-height: 1.45; }
+    .stage { min-width: 0; padding: 25px 27px 38px; }
+    .stage-head { display: flex; align-items: end; justify-content: space-between; gap: 20px; margin-bottom: 24px; }
+    .eyebrow { margin: 0 0 8px; color: var(--coral); font: 500 11px 'DM Mono'; letter-spacing: 1.3px; text-transform: uppercase; }
+    h1 { margin: 0; font: 600 clamp(22px, 2vw, 30px) 'Space Grotesk'; letter-spacing: -1.1px; }
+    .subline { margin: 8px 0 0; color: var(--muted); font-size: 13px; }
+    .view-switch { display: flex; gap: 3px; padding: 4px; border-radius: 10px; background: #e6ebe6; }
+    .view-switch button { border: 0; padding: 8px 12px; border-radius: 7px; color: #78837d; background: transparent; font-size: 12px; }
+    .view-switch button.active { color: var(--ink); background: var(--panel); box-shadow: 0 2px 8px rgba(25,35,29,.08); }
+    .queue-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 20px 0 13px; padding: 11px 13px; border: 1px solid var(--line); border-radius: 11px; background: rgba(251,252,250,.72); }
+    .queue-state { display: flex; align-items: center; gap: 8px; color: #718077; font-size: 11px; }
+    .queue-state i { width: 7px; height: 7px; border-radius: 50%; background: #5bc37a; box-shadow: 0 0 0 4px rgba(91,195,122,.12); }
+    .queue-tools { display: flex; align-items: center; gap: 4px; }
+    .queue-tools button { width: 28px; height: 28px; display: grid; place-items: center; border: 0; border-radius: 7px; color: #7d8981; background: transparent; }
+    .queue-tools button:hover { color: var(--ink); background: #e9eee8; }
+    .progress { display: none; height: 3px; margin: -13px 0 13px; overflow: hidden; border-radius: 4px; background: #e1e8df; }
+    .progress span { display: block; width: 0; height: 100%; border-radius: inherit; background: var(--coral); transition: width .4s; }
+    .gallery { display: grid; grid-template-columns: repeat(12, 1fr); gap: 11px; }
+    .shot { position: relative; min-height: 190px; overflow: hidden; border-radius: 14px; background: #c9d0cc; box-shadow: var(--shadow); animation: rise .55s both; }
+    .shot.selectable { cursor: pointer; }
+    .shot.selected { box-shadow: 0 0 0 2px var(--lime), var(--shadow); }
+    .result-check { position: absolute; top: 11px; left: 11px; z-index: 2; width: 25px; height: 25px; display: grid; place-items: center; border: 1px solid rgba(255,255,255,.55); border-radius: 7px; color: transparent; background: rgba(17,25,21,.36); backdrop-filter: blur(7px); transition: .2s; }
+    .result-check[data-selected="true"] { color: var(--dark); border-color: var(--lime); background: var(--lime); }
+    .result-check:hover { transform: scale(1.06); }
+    .shot:nth-child(1) { grid-column: span 7; min-height: 288px; animation-delay: .06s; }
+    .shot:nth-child(2) { grid-column: span 5; min-height: 288px; animation-delay: .12s; }
+    .shot:nth-child(3), .shot:nth-child(4), .shot:nth-child(5) { grid-column: span 4; min-height: 156px; animation-delay: .18s; }
+    .shot img { width: 100%; height: 100%; display: block; object-fit: cover; transition: transform .45s cubic-bezier(.2,.8,.2,1), filter .35s; }
+    .shot:hover img { transform: scale(1.055); filter: saturate(1.08); }
+    .shot::after { content: ''; position: absolute; inset: 45% 0 0; background: linear-gradient(transparent, rgba(12,17,15,.76)); pointer-events: none; }
+    .shot-meta { position: absolute; right: 14px; bottom: 13px; left: 14px; z-index: 1; display: flex; justify-content: space-between; align-items: end; color: #fff; }
+    .shot-meta strong { display: block; font-size: 13px; }
+    .shot-meta small { display: block; margin-top: 3px; color: rgba(255,255,255,.68); font: 10px 'DM Mono'; }
+    .shot-actions { display: flex; gap: 5px; opacity: 0; transform: translateY(5px); transition: .25s; }
+    .shot:hover .shot-actions { opacity: 1; transform: translateY(0); }
+    .shot-actions button { width: 30px; height: 30px; display: grid; place-items: center; border: 0; border-radius: 8px; color: #fff; background: rgba(16,23,20,.58); backdrop-filter: blur(6px); }
+    .shot-actions button:hover { background: var(--coral); }
+    .empty-note { display: none; }
+    .composer { border-left: 1px solid var(--line); background: var(--panel); padding: 22px 20px 32px; }
+    .composer-title { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
+    .composer-title h2 { margin: 0; font: 600 16px 'Space Grotesk'; }
+    .step { color: #9aa39e; font: 11px 'DM Mono'; }
+    .field { margin-bottom: 17px; }
+    .field-label { display: flex; justify-content: space-between; margin-bottom: 9px; color: #69746e; font-size: 11px; font-weight: 700; letter-spacing: .7px; text-transform: uppercase; }
+    .field-label span { color: #a1aaa4; font: 10px 'DM Mono'; letter-spacing: 0; text-transform: none; }
+    .select, .prompt { width: 100%; border: 1px solid var(--line); border-radius: 10px; color: var(--ink); background: #f6f8f5; outline: 0; transition: border .2s, box-shadow .2s; }
+    .select { height: 43px; padding: 0 12px; appearance: none; background-image: linear-gradient(45deg, transparent 50%, #7b8780 50%), linear-gradient(135deg, #7b8780 50%, transparent 50%); background-position: calc(100% - 16px) 18px, calc(100% - 11px) 18px; background-size: 5px 5px; background-repeat: no-repeat; }
+    .select:focus, .prompt:focus { border-color: #9fac8f; box-shadow: 0 0 0 4px rgba(216,243,106,.2); }
+    .prompt { min-height: 119px; resize: vertical; padding: 13px; line-height: 1.55; font-size: 13px; }
+    .prompt::placeholder { color: #adb7b1; }
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+    .chip { border: 1px solid #dce4dc; border-radius: 999px; padding: 6px 9px; color: #738078; background: #f8faf7; font-size: 11px; transition: .2s; }
+    .chip:hover { color: var(--ink); border-color: #bac8ba; background: #eef4e9; transform: translateY(-1px); }
+    .control-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    .segmented { display: flex; padding: 3px; border-radius: 9px; background: #edf1ed; }
+    .segmented button { flex: 1; height: 34px; border: 0; border-radius: 7px; color: #7d8881; background: transparent; font-size: 11px; }
+    .segmented button.active { color: var(--ink); background: var(--panel); box-shadow: 0 2px 7px rgba(25,35,29,.08); }
+    .composer-actions { display: flex; align-items: center; gap: 7px; margin-top: 21px; }
+    .clear { width: 39px; height: 48px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 11px; color: #7c8780; background: #f7f9f6; transition: .2s; }
+    .clear:hover { color: var(--coral); border-color: #e5b1a4; }
+    .generate { flex: 1; width: auto; height: 48px; display: flex; align-items: center; justify-content: center; gap: 9px; margin-top: 0; border: 0; border-radius: 11px; color: var(--dark); background: var(--lime); font-weight: 700; box-shadow: 0 10px 24px rgba(173,205,61,.26); transition: .22s; }
+    .generate:hover { transform: translateY(-3px); background: #e1fa82; box-shadow: 0 14px 28px rgba(173,205,61,.34); }
+    .generate:active { transform: translateY(0); }
+    .generate.loading { pointer-events: none; }
+    .generate.loading svg { animation: spin .8s linear infinite; }
+    .fine-print { margin: 10px 0 0; text-align: center; color: #9ca7a0; font: 10px 'DM Mono'; }
+    .cancel { display: none; width: 100%; height: 37px; margin-top: 8px; border: 1px solid #e5b1a4; border-radius: 9px; color: #ba654e; background: #fff8f5; font-size: 11px; }
+    .cancel.show { display: block; }
+    .recent { display: flex; align-items: center; justify-content: space-between; margin-top: 31px; padding-top: 18px; border-top: 1px solid var(--line); }
+    .recent strong { font: 600 13px 'Space Grotesk'; }
+    .recent a { color: var(--coral); font-size: 11px; text-decoration: none; }
+    .status { display: flex; gap: 9px; align-items: center; margin-top: 20px; padding: 12px; border-radius: 10px; background: #f0f4ed; color: #708071; font-size: 11px; }
+    .status i { width: 7px; height: 7px; border-radius: 50%; background: #5bc37a; }
+    .toast { position: fixed; right: 28px; bottom: 25px; z-index: 8; display: flex; align-items: center; gap: 9px; padding: 12px 15px; border: 1px solid #cad8c4; border-radius: 10px; color: #40533f; background: #eff9d9; box-shadow: var(--shadow); font-size: 12px; animation: toast-in .3s ease-out; }
+    .toast.hide { animation: toast-out .25s ease-in forwards; }
+    @keyframes rise { from { opacity: 0; transform: translateY(15px) scale(.985); } to { opacity: 1; transform: translateY(0) scale(1); } }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @keyframes toast-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+    @keyframes toast-out { to { opacity: 0; transform: translateY(10px); } }
+    @media (max-width: 1250px) { .content { grid-template-columns: 260px minmax(0,1fr) 320px; } .stage { padding-inline: 21px; } .topbar { padding-inline: 24px; } }
+    @media (max-width: 980px) { .content { grid-template-columns: 245px minmax(0,1fr); } .composer { grid-column: 1 / -1; border-top: 1px solid var(--line); border-left: 0; display: grid; grid-template-columns: 1fr 1.1fr; gap: 0 25px; } .composer-title, .composer-actions, .fine-print, .status, .recent, .composer > .chips { grid-column: 1 / -1; } .composer-title { margin-bottom: 17px; } }
+    @media (max-width: 820px) { .app { display: block; } .rail { position: fixed; inset: auto 0 0; width: 100%; height: 64px; flex-direction: row; justify-content: space-around; padding: 8px 12px; } .logo, .rail-bottom { display: none; } .rail-nav { display: flex; justify-content: space-around; gap: 4px; } .rail-btn { width: 46px; } .rail-btn.active::before { top: auto; bottom: -8px; left: 50%; width: 18px; height: 3px; border-radius: 3px; transform: translateX(-50%); } .workspace { padding-bottom: 64px; } .content { display: block; } .setup { border-right: 0; border-bottom: 1px solid var(--line); } .composer { display: block; } .topbar { height: 68px; } .api-pill { display: none; } .stage-head { align-items: start; flex-direction: column; } }
+    @media (max-width: 560px) { .stage { padding: 23px 15px 30px; } .topbar { padding: 0 15px; } .crumb span { display: none; } .gallery { gap: 9px; } .shot:nth-child(1), .shot:nth-child(2) { grid-column: span 12; min-height: 230px; } .shot:nth-child(3), .shot:nth-child(4), .shot:nth-child(5) { grid-column: span 6; min-height: 145px; } .composer { padding: 23px 15px 26px; } }
+    @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; scroll-behavior: auto !important; } }
+  </style>
+  <style id="bottom-composer-layout">
+    /* Alternative app layout: persistent navigation + canvas + bottom generation dock. */
+    @media (min-width: 981px) {
+      .content { grid-template-columns: 292px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; align-items: start; }
+      .setup { grid-column: 1; grid-row: 1 / span 2; min-height: calc(100vh - 76px); max-height: calc(100vh - 76px); overflow: auto; }
+      .stage { grid-column: 2; grid-row: 1; min-height: 0; }
+      .composer { grid-column: 2; grid-row: 2; display: flex; flex-wrap: wrap; align-items: flex-end; gap: 0 12px; padding: 15px 21px 17px; border-top: 1px solid var(--line); border-left: 0; box-shadow: 0 -12px 32px rgba(26,35,31,.06); position: sticky; bottom: 0; z-index: 2; }
+      .composer-title { flex: 0 0 92px; align-self: center; display: block; margin: 0; }
+      .composer-title .step { display: block; margin-top: 5px; }
+      .composer > .control-row { flex: 0 0 252px; margin-bottom: 0; }
+      .composer > .control-row .field { margin-bottom: 0; }
+      .composer > .prompt-field { flex: 1 1 270px; min-width: 220px; margin-bottom: 0; }
+      .composer > .prompt-field .prompt { min-height: 64px; height: 64px; resize: none; }
+      .composer > .prompt-field .chips { display: none; }
+      .composer > .output-field { flex: 0 0 165px; margin-bottom: 0; }
+      .composer > .count-field { flex: 0 0 144px; margin-bottom: 0; }
+      .composer-actions { flex: 0 0 194px; margin-top: 0; }
+      .composer .fine-print { flex: 0 0 100%; order: 7; margin: 9px 0 0; text-align: right; }
+      .composer .status, .composer .recent, .composer > .chips { display: none; }
+      .composer .cancel { flex: 0 0 100%; order: 8; margin-top: 8px; }
+    }
+    @media (min-width: 981px) and (max-width: 1250px) {
+      .setup { width: 260px; }
+      .content { grid-template-columns: 260px minmax(0, 1fr); }
+      .composer > .control-row { flex-basis: 220px; }
+      .composer > .prompt-field { min-width: 180px; }
+    }
+    @media (max-width: 980px) {
+      .content { display: block; }
+      .setup { border-right: 0; border-bottom: 1px solid var(--line); max-height: none; }
+      .composer { display: block; border-top: 1px solid var(--line); border-left: 0; }
+    }
+  </style>
+  <style id="bottom-dock-v2">
+    @media (min-width: 981px) {
+      .composer { display: block; padding: 15px 21px 16px; }
+      .dock-head { display: flex; align-items: center; gap: 20px; }
+      .dock-head .composer-title { flex: 0 0 92px; align-self: center; display: block; margin: 0; }
+      .dock-head .composer-title .step { display: block; margin-top: 5px; }
+      .model-preset { flex: 1 1 auto; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; margin: 0; }
+      .model-preset .field { margin-bottom: 0; }
+      .dock-prompt { margin-top: 12px; }
+      .dock-prompt .prompt-field { margin-bottom: 0; }
+      .dock-prompt .prompt { height: 70px; min-height: 70px; resize: none; }
+      .dock-prompt .prompt-field .chips { display: none; }
+      .dock-footer { display: flex; align-items: flex-end; gap: 12px; margin-top: 12px; padding-top: 12px; border-top: 1px solid #e4e9e4; }
+      .dock-footer .field { margin-bottom: 0; }
+      .dock-footer .output-field { flex: 0 0 184px; }
+      .dock-footer .output-field .control-row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+      .dock-footer .count-field { flex: 0 0 160px; }
+      .dock-footer .composer-actions { flex: 0 0 215px; margin: 0; }
+      .dock-footer .fine-print { flex: 1 1 auto; order: initial; margin: 0 0 13px auto; text-align: right; white-space: nowrap; }
+      .composer > .cancel { max-width: 215px; margin: 9px 0 0 auto; }
+    }
+    @media (min-width: 981px) and (max-width: 1250px) {
+      .dock-head { gap: 12px; }
+      .dock-head .composer-title { flex-basis: 80px; }
+      .model-preset { gap: 8px; }
+      .dock-footer { gap: 8px; }
+      .dock-footer .output-field { flex-basis: 168px; }
+      .dock-footer .count-field { flex-basis: 140px; }
+      .dock-footer .composer-actions { flex-basis: 185px; }
+      .dock-footer .fine-print { font-size: 9px; }
+    }
+    @media (max-width: 980px) {
+      .dock-head { display: block; }
+      .dock-head .composer-title { margin-bottom: 15px; }
+      .model-preset { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+      .dock-prompt { margin-top: 18px; }
+      .dock-footer { display: grid; grid-template-columns: 1fr 1fr; gap: 13px; margin-top: 15px; padding-top: 15px; border-top: 1px solid var(--line); }
+      .dock-footer .field { margin-bottom: 0; }
+      .dock-footer .composer-actions { grid-column: 1 / -1; }
+      .dock-footer .fine-print { grid-column: 1 / -1; }
+    }
+    @media (max-width: 560px) {
+      .model-preset { grid-template-columns: 1fr; }
+      .dock-footer { grid-template-columns: 1fr; }
+      .dock-footer .composer-actions, .dock-footer .fine-print { grid-column: auto; }
+      .dock-footer .fine-print { text-align: center; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="rail" aria-label="主导航">
+      <div class="logo" aria-label="样片工厂">S</div>
+      <nav class="rail-nav">
+        <button class="rail-btn active" aria-label="创作工作台" title="创作工作台"><i data-lucide="sparkles"></i></button>
+        <button class="rail-btn" aria-label="素材库" title="素材库"><i data-lucide="images"></i></button>
+        <button class="rail-btn" aria-label="预设" title="预设"><i data-lucide="sliders-horizontal"></i></button>
+        <button class="rail-btn" aria-label="生成历史" title="生成历史"><i data-lucide="history"></i></button>
+      </nav>
+      <div class="rail-bottom">
+        <button class="rail-btn" aria-label="API 管理" title="API 管理"><i data-lucide="server"></i></button>
+        <button class="rail-btn" aria-label="设置" title="设置"><i data-lucide="settings-2"></i></button>
+      </div>
+    </aside>
+    <div class="workspace">
+      <header class="topbar">
+        <div class="crumb"><strong>样片工厂</strong><span>/</span><span>创作工作台</span></div>
+        <div class="top-actions">
+          <div class="api-pill"><span class="api-dot"></span> Gemini Studio <i data-lucide="chevron-down" width="14"></i></div>
+          <button class="icon-btn" aria-label="通知" title="通知"><i data-lucide="bell" width="17"></i></button>
+          <button class="icon-btn" aria-label="账户" title="账户"><i data-lucide="circle-user-round" width="18"></i></button>
+        </div>
+      </header>
+      <main class="content">
+        <aside class="setup" aria-label="任务设置">
+          <button class="new-task" id="newTask"><i data-lucide="plus" width="15"></i> 新建任务</button>
+          <div class="setup-heading"><h2>生成模式</h2><small id="modeLabel">图生图</small></div>
+          <div class="mode-tabs" id="modes"><button data-mode="text">文字生图</button><button class="active" data-mode="image">图生图</button></div>
+          <p class="setup-hint" id="modeHint">上传素材并指定角色，提示词只补充生成意图。</p>
+          <div id="imageTools">
+            <div class="setup-heading"><h2>处理方式</h2><small id="operationLabel">逐张批处理</small></div>
+            <div class="operation-tabs" id="operations"><button class="active" data-operation="batch">逐张<br>批处理</button><button data-operation="three-view">三视图</button><button data-operation="edit">局部<br>编辑</button></div>
+            <p class="operation-note" id="operationHint">每张目标图独立生成，可叠加人物、动作、背景和道具参考。</p>
+            <div class="material-list" id="materialList">
+              <div class="material-box has-files" data-material="person"><div class="material-heading"><div><strong>人物参考</strong><small>固定人物身份与服装</small></div><span class="material-count"><b id="personCount">2</b> / 2</span></div><div class="material-body"><div class="thumb"><img alt="人物参考 1" src="https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=160&q=80"><button class="remove-thumb" aria-label="删除人物参考"><i data-lucide="x" width="9"></i></button></div><div class="thumb"><img alt="人物参考 2" src="https://images.unsplash.com/photo-1488426862026-3ee34a7d66df?auto=format&fit=crop&w=160&q=80"><button class="remove-thumb" aria-label="删除人物参考"><i data-lucide="x" width="9"></i></button></div><button class="material-add"><i data-lucide="plus" width="13"></i>继续添加</button></div><div class="material-footer"><span>素材已就绪</span><span>2 张待使用</span></div></div>
+              <div class="material-box has-files" data-material="reference"><div class="material-heading"><div><strong>目标 / 构图图</strong><small>每张目标图执行一次处理</small></div><span class="material-count"><b>3</b> / 30</span></div><div class="material-body"><div class="thumb"><img alt="目标图 1" src="https://images.unsplash.com/photo-1518005020951-eccb494ad742?auto=format&fit=crop&w=160&q=80"><button class="remove-thumb" aria-label="删除目标图"><i data-lucide="x" width="9"></i></button></div><div class="thumb"><img alt="目标图 2" src="https://images.unsplash.com/photo-1600607687920-4e2a09cf159d?auto=format&fit=crop&w=160&q=80"><button class="remove-thumb" aria-label="删除目标图"><i data-lucide="x" width="9"></i></button></div><button class="material-add"><i data-lucide="plus" width="13"></i>添加图片</button></div><div class="material-footer"><span>任务素材</span><span>3 张待使用</span></div></div>
+              <div class="material-box" data-material="extras"><div class="material-heading"><div><strong>更多参考</strong><small>背景 · 道具 · 动作 · 画面</small></div><span class="material-count">可选</span></div><div class="material-body"><button class="material-add"><i data-lucide="image-plus" width="14"></i>拖入或选择图片</button></div><div class="material-footer"><span>可选素材</span><span>最多 30 张</span></div></div>
+            </div>
+          </div>
+        </aside>
+        <section class="stage">
+          <div class="stage-head"><div><p class="eyebrow">Workspace / 01</p><h1>生成结果</h1><p class="subline">当前任务 · <b id="taskSummary">逐张批处理 · 3 张目标图</b></p></div><div class="view-switch" role="tablist"><button class="active" role="tab">画廊</button><button role="tab">队列 <span id="queueCount">0</span></button></div></div>
+          <div class="queue-bar"><div class="queue-state"><i></i><span id="queueState">就绪 · 可开始生成</span></div><div class="queue-tools"><button id="selectAll" aria-label="全选" title="全选"><i data-lucide="check-square" width="15"></i></button><button id="downloadAll" aria-label="导出" title="导出"><i data-lucide="download" width="15"></i></button><button id="deleteAll" aria-label="删除选中" title="删除选中"><i data-lucide="trash-2" width="15"></i></button></div></div>
+          <div class="progress" id="progress"><span></span></div>
+          <div class="gallery" id="gallery">
+            <article class="shot selectable selected" data-result><button class="result-check" aria-label="选择结果" data-selected="true"><i data-lucide="check" width="13"></i></button><img alt="雾中湖畔的建筑概念图" src="https://images.unsplash.com/photo-1518005020951-eccb494ad742?auto=format&fit=crop&w=1200&q=85"><div class="shot-meta"><div><strong>逐张处理 01</strong><small>2K · 16:9 · 已完成</small></div><div class="shot-actions"><button aria-label="继续编辑"><i data-lucide="pencil" width="14"></i></button><button aria-label="下载"><i data-lucide="download" width="14"></i></button></div></div></article>
+            <article class="shot selectable" data-result><button class="result-check" aria-label="选择结果" data-selected="false"><i data-lucide="check" width="13"></i></button><img alt="红色服装人物肖像" src="https://images.unsplash.com/photo-1534528741775-53994a69daeb?auto=format&fit=crop&w=900&q=85"><div class="shot-meta"><div><strong>逐张处理 02</strong><small>2K · 16:9 · 已完成</small></div><div class="shot-actions"><button aria-label="继续编辑"><i data-lucide="pencil" width="14"></i></button><button aria-label="下载"><i data-lucide="download" width="14"></i></button></div></div></article>
+            <article class="shot selectable" data-result><button class="result-check" aria-label="选择结果" data-selected="false"><i data-lucide="check" width="13"></i></button><img alt="蓝色光影中的产品静物" src="https://images.unsplash.com/photo-1494438639946-1ebd1d20bf85?auto=format&fit=crop&w=700&q=85"><div class="shot-meta"><div><strong>逐张处理 03</strong><small>2K · 16:9 · 已完成</small></div><div class="shot-actions"><button aria-label="继续编辑"><i data-lucide="pencil" width="14"></i></button><button aria-label="下载"><i data-lucide="download" width="14"></i></button></div></div></article>
+            <article class="shot selectable" data-result><button class="result-check" aria-label="选择结果" data-selected="false"><i data-lucide="check" width="13"></i></button><img alt="未来感室内空间" src="https://images.unsplash.com/photo-1600607687920-4e2a09cf159d?auto=format&fit=crop&w=700&q=85"><div class="shot-meta"><div><strong>三视图参考</strong><small>1K · 4:5 · 已完成</small></div><div class="shot-actions"><button aria-label="继续编辑"><i data-lucide="pencil" width="14"></i></button><button aria-label="下载"><i data-lucide="download" width="14"></i></button></div></div></article>
+            <article class="shot selectable" data-result><button class="result-check" aria-label="选择结果" data-selected="false"><i data-lucide="check" width="13"></i></button><img alt="黄色背景的时尚人物" src="https://images.unsplash.com/photo-1529139574466-a303027c1d8b?auto=format&fit=crop&w=700&q=85"><div class="shot-meta"><div><strong>局部编辑 01</strong><small>2K · 4:5 · 已完成</small></div><div class="shot-actions"><button aria-label="继续编辑"><i data-lucide="pencil" width="14"></i></button><button aria-label="下载"><i data-lucide="download" width="14"></i></button></div></div></article>
+          </div>
+        </section>
+        <aside class="composer" aria-label="生成控制台">
+          <div class="dock-head"><div class="composer-title"><h2>生成参数</h2><span class="step">配置 / 03</span></div><div class="control-row model-preset"><div class="field"><div class="field-label">模型</div><select class="select"><option>Gemini 2.5 Flash Image</option><option>Imagen 4 Preview</option><option>GPT Image 1</option></select></div><div class="field"><div class="field-label">预设</div><select class="select"><option>未选择预设</option><option>Editorial portrait</option><option>Clean product</option></select></div></div></div>
+          <div class="dock-prompt"><div class="field prompt-field"><div class="field-label">提示词 <span id="wordCount">0 / 500</span></div><textarea id="prompt" class="prompt" maxlength="500" placeholder="补充画面意图…">editorial portrait, soft side light, sculptural shadow, muted red styling</textarea><div class="chips"><button class="chip">电影感</button><button class="chip">产品摄影</button><button class="chip">建筑空间</button><button class="chip">胶片颗粒</button></div></div></div>
+          <div class="dock-footer"><div class="field output-field"><div class="field-label">输出设置</div><div class="control-row"><select class="select"><option>2K</option><option>1K</option><option>4K</option></select><select class="select" id="ratioSelect"><option>1:1</option><option>4:5</option><option>16:9</option><option>9:16</option><option>自动比例</option></select></div></div><div class="field count-field"><div class="field-label">数量 <span>每个任务</span></div><div class="segmented" id="count"><button class="active">1</button><button>2</button><button>4</button><button>8</button></div></div><div class="composer-actions"><button class="clear" id="clearPrompt" aria-label="清空当前" title="清空当前"><i data-lucide="rotate-ccw" width="16"></i></button><button class="generate" id="generate"><i data-lucide="sparkles" width="17"></i><span>开始生成</span></button></div><p class="fine-print">预计 1 个任务 · 可随时停止</p></div>
+          <button class="cancel" id="cancel">停止生成</button>
+          <div class="status"><i></i><span>Gemini Studio 已连接 · 延迟 240ms</span></div>
+          <div class="recent"><strong>提示词预设</strong><a href="#">管理预设 <i data-lucide="arrow-up-right" width="12"></i></a></div>
+          <div class="chips"><button class="chip preset-chip">Editorial portrait</button><button class="chip preset-chip">Clean product</button><button class="chip preset-chip">Neon architecture</button></div>
+        </aside>
+      </main>
+    </div>
+  </div>
+  <script>
+    lucide.createIcons();
+    const prompt = document.querySelector('#prompt');
+    const wordCount = document.querySelector('#wordCount');
+    const gallery = document.querySelector('#gallery');
+    const generate = document.querySelector('#generate');
+    const cancel = document.querySelector('#cancel');
+    const queue = document.querySelector('#queueCount');
+    const queueState = document.querySelector('#queueState');
+    const progress = document.querySelector('#progress');
+    let generationTimer;
+    const updateCount = () => wordCount.textContent = `${prompt.value.length} / 500`;
+    prompt.addEventListener('input', updateCount); updateCount();
+
+    function toast(message) {
+      const node = document.createElement('div'); node.className = 'toast';
+      node.innerHTML = `<i data-lucide="check-circle-2" width="16"></i>${message}`;
+      document.body.appendChild(node); lucide.createIcons();
+      setTimeout(() => { node.classList.add('hide'); setTimeout(() => node.remove(), 260); }, 2600);
+    }
+    function setActive(group, item) { group.querySelectorAll('button').forEach(x => x.classList.remove('active')); item.classList.add('active'); }
+    document.querySelectorAll('.rail-btn').forEach(item => item.addEventListener('click', () => { document.querySelectorAll('.rail-btn').forEach(x => x.classList.remove('active')); item.classList.add('active'); }));
+    document.querySelectorAll('.chip:not(.preset-chip)').forEach(chip => chip.addEventListener('click', () => { prompt.value = `${prompt.value.replace(/\s+$/, '')}${prompt.value ? ', ' : ''}${chip.textContent}`; updateCount(); prompt.focus(); }));
+    document.querySelectorAll('.preset-chip').forEach(chip => chip.addEventListener('click', () => { prompt.value = chip.textContent + ', '; updateCount(); prompt.focus(); toast(`已加载预设：${chip.textContent}`); }));
+    document.querySelector('#count').addEventListener('click', e => { if (e.target.tagName === 'BUTTON') setActive(e.currentTarget, e.target); });
+    document.querySelector('#modes').addEventListener('click', e => {
+      if (e.target.tagName !== 'BUTTON') return;
+      setActive(e.currentTarget, e.target);
+      const image = e.target.dataset.mode === 'image';
+      document.querySelector('#modeLabel').textContent = image ? '图生图' : '文字生图';
+      document.querySelector('#modeHint').textContent = image ? '上传素材并指定角色，提示词只补充生成意图。' : '无需上传素材，提示词将直接发送给生成接口。';
+      document.querySelector('#imageTools').style.display = image ? '' : 'none';
+      document.querySelector('#taskSummary').textContent = image ? '逐张批处理 · 3 张目标图' : '文字生图 · 1 个任务';
+    });
+    const operationNames = {batch: ['逐张批处理', '每张目标图独立生成，可叠加人物、动作、背景和道具参考。'], 'three-view': ['三视图', '每张身份图生成一组正面、45 度和侧面视图。'], edit: ['局部继续编辑', '从结果中选择基础图，只修改提示词指定的局部内容。']};
+    document.querySelector('#operations').addEventListener('click', e => { if (e.target.tagName !== 'BUTTON') return; setActive(e.currentTarget, e.target); const value = e.target.dataset.operation; document.querySelector('#operationLabel').textContent = operationNames[value][0]; document.querySelector('#operationHint').textContent = operationNames[value][1]; document.querySelector('#taskSummary').textContent = `${operationNames[value][0]} · 3 张目标图`; });
+    document.querySelectorAll('.remove-thumb').forEach(remove => remove.addEventListener('click', e => { const thumb = e.currentTarget.closest('.thumb'); const box = e.currentTarget.closest('.material-box'); thumb.remove(); const count = box.querySelector('.material-count b'); if (count) count.textContent = Math.max(0, Number(count.textContent) - 1); toast('已移除素材'); }));
+    document.querySelectorAll('.material-add').forEach(add => add.addEventListener('click', () => { const box = add.closest('.material-box'); box.classList.add('has-files'); toast('原型中已模拟添加素材'); }));
+    document.querySelectorAll('[data-result]').forEach(card => card.addEventListener('click', e => { if (e.target.closest('.shot-actions')) return; const selected = card.classList.toggle('selected'); const check = card.querySelector('.result-check'); check.dataset.selected = selected; updateSelectedCount(); }));
+    function updateSelectedCount() { const selected = gallery.querySelectorAll('.shot.selected').length; queueState.textContent = selected ? `已选择 ${selected} 张结果` : '就绪 · 可开始生成'; }
+    document.querySelector('#selectAll').addEventListener('click', () => { const cards = gallery.querySelectorAll('[data-result]'); const shouldSelect = [...cards].some(x => !x.classList.contains('selected')); cards.forEach(x => { x.classList.toggle('selected', shouldSelect); x.querySelector('.result-check').dataset.selected = shouldSelect; }); updateSelectedCount(); });
+    document.querySelector('#deleteAll').addEventListener('click', () => { const selected = gallery.querySelectorAll('.shot.selected'); if (!selected.length) return toast('请先选择要删除的结果'); selected.forEach(x => x.remove()); updateSelectedCount(); toast('已删除选中结果'); });
+    document.querySelector('#downloadAll').addEventListener('click', () => toast('已准备导出选中结果'));
+    document.querySelector('#clearPrompt').addEventListener('click', () => { prompt.value = ''; updateCount(); prompt.focus(); toast('已清空当前提示词'); });
+    document.querySelector('#newTask').addEventListener('click', () => { prompt.value = ''; updateCount(); document.querySelectorAll('[data-result]').forEach(x => x.classList.remove('selected')); updateSelectedCount(); toast('已新建任务'); });
+    cancel.addEventListener('click', () => { clearTimeout(generationTimer); generate.classList.remove('loading'); generate.querySelector('span').textContent = '开始生成'; cancel.classList.remove('show'); progress.style.display = 'none'; queue.textContent = '0'; queueState.textContent = '已停止 · 可重新生成'; toast('已停止当前生成'); });
+    generate.addEventListener('click', () => { if (generate.classList.contains('loading')) return; generate.classList.add('loading'); generate.querySelector('span').textContent = '正在生成…'; cancel.classList.add('show'); progress.style.display = 'block'; progress.querySelector('span').style.width = '35%'; queue.textContent = '1'; queueState.textContent = '正在生成 · 1 个任务'; generationTimer = setTimeout(() => { progress.querySelector('span').style.width = '100%'; setTimeout(() => { const card = document.createElement('article'); card.className = 'shot selectable selected'; card.dataset.result = ''; card.innerHTML = `<button class="result-check" aria-label="选择结果" data-selected="true"><i data-lucide="check" width="13"></i></button><img alt="刚刚生成的创意画面" src="https://images.unsplash.com/photo-1531058020387-3be344556be6?auto=format&fit=crop&w=700&q=85"><div class="shot-meta"><div><strong>刚刚生成 · 01</strong><small>2K · 已完成</small></div><div class="shot-actions"><button aria-label="继续编辑"><i data-lucide="pencil" width="14"></i></button><button aria-label="下载"><i data-lucide="download" width="14"></i></button></div></div>`; gallery.prepend(card); card.addEventListener('click', e => { if (e.target.closest('.shot-actions')) return; card.classList.toggle('selected'); card.querySelector('.result-check').dataset.selected = card.classList.contains('selected'); updateSelectedCount(); }); lucide.createIcons(); generate.classList.remove('loading'); generate.querySelector('span').textContent = '开始生成'; cancel.classList.remove('show'); progress.style.display = 'none'; queue.textContent = '0'; queueState.textContent = '就绪 · 可开始生成'; updateSelectedCount(); toast('画面已生成，已添加到结果队列'); }, 350); }, 1150); });
+  </script>
+</body>
+</html>
