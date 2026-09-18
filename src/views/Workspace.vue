@@ -3,6 +3,7 @@ import {ref, computed, onMounted, onBeforeUnmount, onActivated, markRaw, watch} 
 import {Delete, Upload, Refresh, VideoPlay, Download, SwitchButton} from '@element-plus/icons-vue'
 import {ElMessage} from 'element-plus'
 import {X, Plus, ImagePlus, PenLine} from 'lucide-vue-next'
+import {normalizeImageFile, droppedFiles} from '../utils/image-drop.mjs'
 import {
   getSettings,
   getModels,
@@ -855,9 +856,21 @@ async function prepareEditReferenceFile(file) {
   return {file: await resizeImageFile(file, width, height), width, height, resized: true}
 }
 
+async function dropMaterialFiles(key, event) {
+  const files = droppedFiles(event.dataTransfer)
+  if (!files.length) {
+    error.value = '未读取到图片文件，请从 Finder 或文件管理器拖入本地图片，或点击上传。'
+    return
+  }
+  for (const file of files) await addFiles(key, file)
+}
+
 async function addFiles(key, upload) {
-  const file = rawFile(upload);
-  if (!file || !file.type?.startsWith('image/')) return;
+  const file = normalizeImageFile(rawFile(upload));
+  if (!file) {
+    error.value = '请选择图片文件，不支持文件夹或非图片附件。';
+    return;
+  }
   let preparedFile = file
   let width = 0
   let height = 0
@@ -873,7 +886,7 @@ async function addFiles(key, upload) {
       showMessage('warning', `图片“${file.name}”尺寸为 ${width} × ${height}，已自动压缩为 ${resizedWidth} × ${resizedHeight}（最长边 4096 像素）`)
     }
   } catch (exception) {
-    error.value = exception?.message || '图片压缩失败，请重新上传图片';
+    error.value = `无法读取图片“${file.name}”，请确认文件已下载到本地；HEIC、HEIF 或 TIFF 图片可先导出为 JPG / PNG。${exception?.message ? `（${exception.message}）` : ''}`;
     return;
   }
   const limit = key === 'person' ? (imageOperation.value === 'batch' ? (personReplaceVariant.value === 'single' ? 1 : 2) : 3) : ['pose', 'batchReference', 'editReference', 'clothingPerson', 'clothing'].includes(key) ? 1 : 30;
@@ -1783,6 +1796,8 @@ onBeforeUnmount(() => {
                 <el-upload class="material-upload" drag action="#" :auto-upload="false" :show-file-list="false"
                            :multiple="item.limit > 1"
                            accept="image/*"
+                           @dragover.prevent.stop="($event.dataTransfer && ($event.dataTransfer.dropEffect = 'copy'))"
+                           @drop.prevent.stop="dropMaterialFiles(item.key, $event)"
                            @change="addFiles(item.key, $event)">
                   <div class="drop-zone">
                     <ImagePlus :size="15" aria-hidden="true"/>
