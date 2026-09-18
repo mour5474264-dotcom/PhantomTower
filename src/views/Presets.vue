@@ -23,6 +23,7 @@ const formRules = computed(() => ({
 
 const isBuiltIn = computed(() => activeTab.value === 'builtin')
 const title = computed(() => isBuiltIn.value ? '内置提示词预设' : '提示词预设')
+const operationLabels = {batch: '逐张批处理', 'three-view': '三视图', 'clothing-replace': '服装替换', edit: '局部继续编辑', fusion: '多图融合', background: '背景替换', prop: '道具替换', all: '全部', text: '文字生图'}
 const description = computed(() => isBuiltIn.value
   ? '内置预设会根据创作台当前功能和人物模式自动匹配，不会作为普通预设显示。'
   : '保存可重复使用的创作提示词；创作台的所有模式均可按需选择。')
@@ -124,6 +125,9 @@ onMounted(async () => {
       <el-table v-if="templates.length" :data="templates" stripe>
         <el-table-column type="index" label="#" width="64"/>
         <el-table-column prop="name" label="预设名称" min-width="180"/>
+        <el-table-column v-if="isBuiltIn" label="适用功能" width="130">
+          <template #default="{ row }">{{ operationLabels[row.operation] || row.operation }}</template>
+        </el-table-column>
         <el-table-column v-if="isBuiltIn" label="人物模式" width="120">
           <template #default="{ row }">{{ row.variant === 'single' ? '单人替换' : row.variant === 'double' ? '双人替换' : '通用' }}</template>
         </el-table-column>

@@ -48,12 +48,14 @@ const generationControllers = new Map()
 const activeGenerationWorks = new Set()
 const queuedCount = ref(0)
 const preview = ref('')
-const materials = ref({person: [], pose: [], prop: [], scene: [], reference: [], batchReference: [], editReference: []})
+const materials = ref({person: [], pose: [], prop: [], scene: [], reference: [], batchReference: [], editReference: [], clothingPerson: [], clothing: []})
 const mode = ref('text')
 const isTextMode = computed(() => mode.value === 'text')
 const imageOperation = ref('batch')
 const personReplaceVariant = ref('double')
-const visibleImageOperations = ['batch', 'three-view', 'edit']
+const visibleImageOperations = ['batch', 'three-view', 'edit', 'clothing-replace']
+const clothingScope = ref('outfit')
+const clothingScopes = {top: '上衣', bottom: '下装', outfit: '整套'}
 const replaceObject = ref('')
 const editParent = ref(null)
 const promptHeight = ref(112)
@@ -237,6 +239,8 @@ async function getRequestSize(task, requestConfig) {
 }
 
 const materialLabels = {
+  clothingPerson: '人物图',
+  clothing: '服装参考图',
   person: '人物',
   prop: '道具',
   reference: '目标/构图',
@@ -279,13 +283,14 @@ const taskCount = computed(() => isTextMode.value ? (prompt.value.trim() || pres
 const totalExpected = computed(() => taskCount.value * Math.max(1, Number(count.value || 1)))
 const imagesPerRequest = computed(() => Object.values(materials.value).reduce((total, items) => total + items.length, 0))
 const sizeSummary = computed(() => {
-  return `${resolution.value} · ${aspectRatio.value === 'auto' ? '自动比例' : aspectRatio.value}`
+  const autoRatio = !isTextMode.value && imageOperation.value === 'three-view' ? '自动 3:2' : '自动比例'
+  return `${resolution.value} · ${aspectRatio.value === 'auto' ? autoRatio : aspectRatio.value}`
 })
 const expectedFormula = computed(() => {
   const copies = Math.max(1, Number(count.value || 1))
   if (isTextMode.value) return `1 个文字任务 x ${copies}`
   if (imageOperation.value === 'batch') return `${materials.value.reference.length} 张目标图 x ${copies}`
-  if (imageOperation.value === 'three-view') return `${materials.value.reference.length} 张身份图 x ${copies}`
+  if (imageOperation.value === 'three-view') return `1 组（${materials.value.reference.length} 张参考图）x ${copies} 张成图`
   return `1 个${operationLabel()}任务 x ${copies}`
 })
 const expectedState = computed(() => {
@@ -304,6 +309,8 @@ const configStatusTitle = computed(() => {
 })
 const configStatusType = computed(() => configLoading.value ? 'info' : 'warning')
 const materialTypes = [
+  {key: 'clothingPerson', label: '人物图', step: '必填', required: true, limit: 1},
+  {key: 'clothing', label: '服装参考图', step: '必填', required: true, limit: 1},
   {key: 'person', label: '人物参考', step: '可选', hint: '用于固定人物身份、脸部与服装', limit: 3},
   {
     key: 'reference',
@@ -347,6 +354,7 @@ materialTypes.push({
 })
 const activeMaterialTypes = computed(() => {
   const keys = {
+    'clothing-replace': ['clothingPerson', 'clothing'],
     batch: ['person', 'reference', 'batchReference', 'pose', 'scene', 'prop'],
     'three-view': ['reference'],
     fusion: ['person', 'reference', 'scene', 'prop'],
@@ -359,7 +367,10 @@ const activeMaterialTypes = computed(() => {
         ...item, limit: personReplaceVariant.value === 'single' ? 1 : 2,
         hint: personReplaceVariant.value === 'single' ? '用于固定一个人物的身份、脸部与服装' : '按目标图位置固定两个人物的身份、脸部与服装'
       }
-      : item)
+      : item.key === 'reference' && imageOperation.value === 'three-view'
+          ? {...item, label: '人物参考图', step: '必填', required: true,
+            hint: '上传同一个人的全身、脸部、侧面或背面照片，所有图片共同生成一张角色设定图。可在提示词中指定某张图用于服装或体型参考。'}
+          : item)
 })
 
 const geminiResolutionOptions = [
@@ -625,6 +636,7 @@ function makeHomeMemorySnapshot() {
       customHeight: customHeight.value,
       mode: mode.value,
       imageOperation: imageOperation.value,
+      clothingScope: clothingScope.value,
       replaceObject: replaceObject.value,
       editParent: editParentMemoryItem(editParent.value)
     },
@@ -655,6 +667,7 @@ async function restoreHomeMemory() {
     customHeight.value = form.customHeight ? Number(form.customHeight) : null
     mode.value = form.mode || mode.value
     imageOperation.value = visibleImageOperations.includes(form.imageOperation) ? form.imageOperation : imageOperation.value
+    clothingScope.value = Object.hasOwn(clothingScopes, form.clothingScope) ? form.clothingScope : 'outfit'
     replaceObject.value = form.replaceObject || ''
     editParent.value = form.editParent || null
     Object.keys(materials.value).forEach((key) => {
@@ -684,6 +697,7 @@ function scheduleHomeMemoryPersist() {
 }
 
 function referenceRole(key) {
+  if (key === 'clothingPerson') return 'target_reference'
   if (key === 'reference') return 'target_reference'
   if (key === 'batchReference') return 'visual_reference'
   if (key === 'editReference') return 'edit_reference'
@@ -692,6 +706,8 @@ function referenceRole(key) {
 
 function referencePromptLabel(key) {
   return ({
+    clothingPerson: '待换装人物图',
+    clothing: '服装参考图',
     person: '人物参考图',
     reference: '目标图/构图图',
     prop: '道具图',
@@ -707,15 +723,16 @@ async function buildLabeledReferences(task, materialSet = materials.value) {
   const labeled = []
   const materialOrder = task.materialKeys || ['person', 'reference', 'batchReference', 'pose', 'prop', 'scene', 'editReference']
   for (const key of materialOrder) {
-    const items = key === 'reference' && task.item ? [task.item] : materialSet[key]
-    for (const item of items) {
+    const isThreeView = task.type === 'three-view'
+    const items = key === 'reference' && task.item && !isThreeView ? [task.item] : materialSet[key]
+    for (const [index, item] of items.entries()) {
       const file = rawFile(item)
       if (!file) continue
       labeled.push({
-        role: referenceRole(key),
-        type: materialLabels[key],
-        promptLabel: referencePromptLabel(key),
-        primary: item === task?.item,
+        role: isThreeView ? 'person_reference' : referenceRole(key),
+        type: isThreeView ? '人物参考' : materialLabels[key],
+        promptLabel: isThreeView ? `人物参考图${index + 1}` : referencePromptLabel(key),
+        primary: !isThreeView && item === task?.item,
         data: await fileToAssetReference(file)
       })
     }
@@ -859,7 +876,7 @@ async function addFiles(key, upload) {
     error.value = exception?.message || '图片压缩失败，请重新上传图片';
     return;
   }
-  const limit = key === 'person' ? (imageOperation.value === 'batch' ? (personReplaceVariant.value === 'single' ? 1 : 2) : 3) : ['pose', 'batchReference', 'editReference'].includes(key) ? 1 : 30;
+  const limit = key === 'person' ? (imageOperation.value === 'batch' ? (personReplaceVariant.value === 'single' ? 1 : 2) : 3) : ['pose', 'batchReference', 'editReference', 'clothingPerson', 'clothing'].includes(key) ? 1 : 30;
   if (materials.value[key].length >= limit) {
     error.value = `${materialLabels[key]}最多添加 ${limit} 张`;
     return;
@@ -947,6 +964,7 @@ async function startNewTask() {
   editParent.value = null;
   presetId.value = '';
   personReplaceVariant.value = 'double';
+  clothingScope.value = 'outfit';
   count.value = 1;
   aspectRatio.value = geminiAspectRatioOptions[0].value;
   size.value = '1024x1024';
@@ -1004,6 +1022,7 @@ function setImageOperation(nextOperation) {
 
 function operationLabel(operation = imageOperation.value) {
   return ({
+    'clothing-replace': '服装替换',
     batch: '逐张批处理',
     fusion: '多图融合',
     background: '背景替换',
@@ -1014,6 +1033,11 @@ function operationLabel(operation = imageOperation.value) {
 }
 
 function buildImageTasks() {
+  if (imageOperation.value === 'clothing-replace') {
+    const person = materials.value.clothingPerson[0]
+    if (!person || !materials.value.clothing.length) return []
+    return [{item: person, type: 'clothing-replace', label: `服装替换 · ${clothingScopes[clothingScope.value]}`, clothingScope: clothingScope.value, materialKeys: ['clothingPerson', 'clothing']}]
+  }
   const target = materials.value.reference[0]
   if (imageOperation.value === 'batch') {
     return materials.value.reference.map((item, index) => ({
@@ -1026,9 +1050,7 @@ function buildImageTasks() {
     }))
   }
   if (imageOperation.value === 'three-view') {
-    return materials.value.reference.map((item, index) => ({
-      item, type: 'three-view', label: `三视图 ${index + 1}`, materialKeys: ['reference']
-    }))
+    return target ? [{item: target, type: 'three-view', label: '全身三视图 + 头部多视图', materialKeys: ['reference']}] : []
   }
   if (!target) return []
   if (imageOperation.value === 'fusion') {
@@ -1044,6 +1066,11 @@ function buildImageTasks() {
 }
 
 function imageValidationError() {
+  if (imageOperation.value === 'clothing-replace') {
+    if (materials.value.clothingPerson.length !== 1) return '服装替换需要上传一张人物图'
+    if (materials.value.clothing.length !== 1) return '服装替换需要上传一张服装参考图'
+    return ''
+  }
   if (!materials.value.reference.length) return `${operationLabel()}需要至少一张上传图片`
   if (imageOperation.value === 'batch' && materials.value.person.length > (personReplaceVariant.value === 'single' ? 1 : 2)) return `${personReplaceVariant.value === 'single' ? '单人' : '双人'}替换最多使用 ${personReplaceVariant.value === 'single' ? 1 : 2} 张人物参考图`
   if (imageOperation.value === 'background' && !materials.value.scene.length) return '背景替换需要一张背景参考图'
@@ -1055,8 +1082,23 @@ function imageValidationError() {
   return ''
 }
 
-function buildMaterialPrompt(labeled, taskType = 'text', taskLabel = '提示词变化', replaceObjectText = '', configuredRule = '') {
+function buildMaterialPrompt(labeled, taskType = 'text', taskLabel = '提示词变化', replaceObjectText = '', configuredRule = '', scope = 'outfit') {
   if (!labeled.length) return '';
+  if (taskType === 'clothing-replace') {
+    const scopeRule = scope === 'top' ? '只替换上衣，保留原图下装。' : scope === 'bottom' ? '只替换下装，保留原图上衣。' : '替换参考图中可见的上衣、下装或连衣裙；参考图未提供的服装部分保持原样。'
+    return `【本次替换范围】${scopeRule}`
+  }
+  if (taskType === 'three-view') {
+    return [
+      '【多图融合角色设定图：只生成一张完整成图】',
+      ...labeled.map((item, index) => `图片${index + 1}：${item.promptLabel}（同一个人的参考照片）`),
+      '综合全部参考图识别同一个人物，脸部照片提供五官与骨相，全身照片提供体型和服装，侧面及背面照片补充轮廓和发型。所有图片共同参与同一个任务，不逐张生成，不将多张参考理解为多个人，也不沿用第一张照片的构图。',
+      '若各图服装或发型不同，优先遵循用户指定的参考图；未指定时服装和体型以第一张清晰全身照片为准，没有全身照时以第一张参考图为准。全部输出视角统一身份、服装、发型和配饰。',
+      '布局：左侧并排展示全身正面、90度侧面、背面三视图，从头顶到鞋底完整可见；右侧用两行三列展示头部特写，第一行是正面、45度、90度侧面，第二行是后脑发型、正面自然微笑、正面平静表情。头部特写保留完整头顶、耳部和颈肩，面部清晰。所有视角合在同一张图片中，不输出独立文件。',
+      '纯白无缝背景，干净白色间距，无文字、水印或装饰边框；自然彩色、中性影棚光，真实皮肤和发丝细节，保持人物相似度。',
+      configuredRule
+    ].filter(Boolean).join('\n\n')
+  }
   const primary = labeled.find((item) => item.primary)
   const manifest = ['提示词可直接使用“人物参考图”“目标图/构图图”“道具图”“场景参考图”“动作参考图”“画面参考图”或“编辑参考图”指代对应类别，无需使用图片序号。', '本次请求会同时发送以上全部参考图；本次主参考图是“' + (primary?.promptLabel || '无') + '”。当规则提到目标图、构图图或主参考图时，均以该图片为准。', ...labeled.map((item, index) => `图片${index + 1}：${item.promptLabel}${item.primary ? '（本次主参考图）' : ''}（${item.role}）`)].join('\n');
   const defaultRule = taskType === 'reference'
@@ -1073,9 +1115,7 @@ function buildMaterialPrompt(labeled, taskType = 'text', taskLabel = '提示词�
                           ? `只替换主目标图中的“${replaceObjectText.trim()}”。保持其他主体、位置、比例、透视、接触关系和光线不变，不生成额外道具。`
                           : taskType === 'local-edit'
                               ? '只修改用户指定的局部内容。保持未提及区域的主体、构图、位置、比例、透视、遮挡和光线不变，不重绘整张图片。'
-                              : taskType === 'three-view'
-                                  ? '以上传图片作为唯一身份参考，生成干净的三视图：同一人物的全身正面、45度三分之二侧脸和90度标准侧脸直接并排展示。严格保持原图的人脸特征、脸型、骨相、发型、服装、配饰和头饰，使用纯白无缝背景、自然彩色和中性影棚白平衡，不添加文字、边框或界面元素。'
-                                  : '只根据补充提示词为人物参考中的同一人物创建一个新变化。';
+                              : '只根据补充提示词为人物参考中的同一人物创建一个新变化。';
   const batchMaterialRule = taskType === 'reference' ? [
     labeled.some((item) => item.role === 'pose_reference')
         ? '动作模仿图是本次动作的唯一优先来源：严格模仿其中人物的姿势、肢体关系和身体朝向，但不得带入动作图人物的身份、脸部、服装、道具或背景；此时不要以目标图中的原动作覆盖动作模仿图。'
@@ -1122,7 +1162,7 @@ function createGenerationWork() {
     modelLabel: selectedModel.value?.upstreamName ? `${selectedModel.value.upstreamName} / ${selectedModel.value.name}` : model.value,
     protocol: selectedProtocol.value,
     prompt: prompt.value,
-    presetId: presetId.value || null,
+    presetId: imageOperation.value === 'clothing-replace' && !isTextMode.value ? null : presetId.value || null,
     builtinVariant: imageOperation.value === 'batch' ? personReplaceVariant.value : null,
     mode: isTextMode.value ? 'text' : 'image',
     quality: 'high',
@@ -1132,7 +1172,7 @@ function createGenerationWork() {
     replaceObject: replaceObject.value,
     format: format.value,
     resolution: resolution.value,
-    aspectRatio: aspectRatio.value
+    aspectRatio: !isTextMode.value && imageOperation.value === 'three-view' && aspectRatio.value === 'auto' ? '3:2' : aspectRatio.value
   }
   const materialSnapshot = Object.fromEntries(
       Object.entries(materials.value).map(([key, items]) => [key, [...items]])
@@ -1229,7 +1269,7 @@ async function runGeneration(work) {
         model: work.requestConfig.model,
         modelConfigId: work.requestConfig.modelConfigId,
         protocol: work.requestConfig.protocol,
-        prompt: buildMaterialPrompt(labeled, task.type, task.label, work.requestConfig.replaceObject, selectedTemplate?.systemPrompt || ''),
+        prompt: buildMaterialPrompt(labeled, task.type, task.label, work.requestConfig.replaceObject, selectedTemplate?.systemPrompt || '', task.clothingScope),
         extraPrompt: work.requestConfig.prompt,
         presetId: work.requestConfig.presetId,
         builtinVariant: work.requestConfig.builtinVariant,
@@ -1658,6 +1698,7 @@ watch([
   customHeight,
   mode,
   imageOperation,
+  clothingScope,
   personReplaceVariant,
   replaceObject,
   editParent,
@@ -1705,15 +1746,21 @@ onBeforeUnmount(() => {
                                 @change="setImageOperation">
                   <el-radio-button label="batch">逐张批处理</el-radio-button>
                   <el-radio-button label="three-view">三视图</el-radio-button>
+                  <el-radio-button label="clothing-replace">服装替换</el-radio-button>
                   <!--                  <el-radio-button label="fusion">多图融合</el-radio-button>-->
                   <!--                  <el-radio-button label="background">背景替换</el-radio-button>-->
                   <!--                  <el-radio-button label="prop">道具替换</el-radio-button>-->
                   <el-radio-button label="edit">局部继续编辑</el-radio-button>
                 </el-radio-group>
               </el-form-item>
-              <p class="operation-hint">{{
-                  imageOperation === 'batch' ? '每张目标图独立生成。可选上传一张画面参考图，并在提示词中说明要统一借用的色调、道具或氛围；动作模仿图优先决定动作，人物参考固定身份。' : imageOperation === 'three-view' ? '每张上传图片独立生成一张三视图；可一次选择多张图片，生成后仍可继续添加并再次批量生成。' : imageOperation === 'fusion' ? '人物、主目标、背景和道具共同组成一个融合任务。' : imageOperation === 'background' ? '只使用主目标图和背景参考图，保留前景主体。' : imageOperation === 'prop' ? '只使用主目标图和道具参考图，指定画面中要替换的对象。' : '从结果中选择一张样片作为基础图；可选上传一张编辑参考图，并在提示词中说明要借用的道具、材质或色调。'
+              <p v-if="imageOperation !== 'clothing-replace'" class="operation-hint">{{
+                  imageOperation === 'batch' ? '每张目标图独立生成。可选上传一张画面参考图，并在提示词中说明要统一借用的色调、道具或氛围；动作模仿图优先决定动作，人物参考固定身份。' : imageOperation === 'three-view' ? '多张人物参考融合为一张：左侧全身正面、侧面、背面，右侧头部正面、45度、侧面、后脑及表情特写。自动比例为横向 3:2。' : imageOperation === 'fusion' ? '人物、主目标、背景和道具共同组成一个融合任务。' : imageOperation === 'background' ? '只使用主目标图和背景参考图，保留前景主体。' : imageOperation === 'prop' ? '只使用主目标图和道具参考图，指定画面中要替换的对象。' : '从结果中选择一张样片作为基础图；可选上传一张编辑参考图，并在提示词中说明要借用的道具、材质或色调。'
                 }}</p>
+              <el-form-item v-if="imageOperation === 'clothing-replace'" label="替换范围" class="person-variant-control">
+                <el-radio-group v-model="clothingScope" class="image-operation-options" aria-label="替换范围">
+                  <el-radio-button v-for="(label, value) in clothingScopes" :key="value" :label="value">{{ label }}</el-radio-button>
+                </el-radio-group>
+              </el-form-item>
               <el-form-item v-if="imageOperation === 'batch'" label="人物处理模式" class="person-variant-control">
                 <el-radio-group v-model="personReplaceVariant" class="image-operation-options">
                   <el-radio-button label="single">单人替换</el-radio-button>
@@ -1732,7 +1779,7 @@ onBeforeUnmount(() => {
                   </div>
                   <span class="material-count">{{ materials[item.key].length }}<i>/ {{ item.limit }}</i></span>
                 </div>
-                <p>{{ item.hint }}</p>
+                <p v-if="item.hint">{{ item.hint }}</p>
                 <el-upload class="material-upload" drag action="#" :auto-upload="false" :show-file-list="false"
                            :multiple="item.limit > 1"
                            accept="image/*"
@@ -1749,6 +1796,7 @@ onBeforeUnmount(() => {
                               preview-teleported
                               hide-on-click-modal
                               :preview-src-list="materialPreviewUrls[item.key]"/>
+                    <span v-if="imageOperation === 'three-view'" class="reference-number">{{ index + 1 }}</span>
                     <button type="button" class="thumb-delete" title="删除图片" @click="removeFile(item.key,index)">
                       <X :size="11"/>
                     </button>
@@ -1791,6 +1839,7 @@ onBeforeUnmount(() => {
                          @click="refresh" :disabled="running"/>
               <el-form-item class="quick-control quick-preset" label="预设">
                 <el-select v-model="presetId" class="studio-select" filterable
+                           :disabled="!isTextMode && imageOperation === 'clothing-replace'"
                            :placeholder="configLoading ? '正在加载预设...' : '未选择预设'"
                            popper-class="studio-select-popper" :loading="configLoading" clearable>
                   <el-option v-for="(item, index) in availableTemplates" :key="item.id" :label="item.name"
@@ -1826,7 +1875,7 @@ onBeforeUnmount(() => {
               <el-form-item class="composer-prompt" :class="{ 'is-resizing': promptResizeActive }">
                 <el-input v-model="prompt" type="textarea" :rows="3"
                           :style="{ '--prompt-height': `${promptHeight}px` }"
-                          :placeholder="isTextMode ? '描述想生成的画面、主体、风格和光线' : (imageOperation === 'edit' ? '例如：将编辑参考图中的花替换到桌上花瓶中，其余画面保持不变' : (imageOperation === 'batch' ? '例如：参考画面参考图的色调和光线，调整每张目标图' : '仅填写本次额外要求'))"/>
+                          :placeholder="isTextMode ? '描述想生成的画面、主体、风格和光线' : (imageOperation === 'edit' ? '例如：将编辑参考图中的花替换到桌上花瓶中，其余画面保持不变' : (imageOperation === 'batch' ? '例如：参考画面参考图的色调和光线，调整每张目标图' : imageOperation === 'three-view' ? '例如：第4张参考体型和服装，其余参考脸部；不要眼镜' : '仅填写本次额外要求'))"/>
               </el-form-item>
               <div class="task-action-bar">
                 <el-button class="clear-button" @click="clearCurrent">清空当前</el-button>
@@ -1933,4 +1982,19 @@ onBeforeUnmount(() => {
     </section>
   </div>
 </template>
+
+<style scoped>
+.reference-number {
+  position: absolute;
+  left: 2px;
+  bottom: 2px;
+  padding: 1px 4px;
+  border-radius: 3px;
+  background: #172522d9;
+  color: #fff;
+  font-size: 11px;
+  line-height: 15px;
+  pointer-events: none;
+}
+</style>
 

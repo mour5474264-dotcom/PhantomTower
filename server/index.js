@@ -206,7 +206,7 @@ function normalizePromptTemplate(template, previous = {}) {
         id: String(template?.id || previous.id || crypto.randomUUID()),
         name: String(template?.name || '').trim(),
         mode: ['text', 'image', 'all'].includes(template?.mode) ? template.mode : (previous.mode || 'all'),
-        operation: ['all', 'text', 'batch', 'three-view', 'fusion', 'background', 'prop', 'edit'].includes(template?.operation) ? template.operation : (previous.operation || 'all'),
+        operation: ['all', 'text', 'batch', 'three-view', 'fusion', 'background', 'prop', 'edit', 'clothing-replace'].includes(template?.operation) ? template.operation : (previous.operation || 'all'),
         variant: ['single', 'double'].includes(inferredVariant) ? inferredVariant : '',
         systemPrompt: String(template?.systemPrompt || ''),
         defaultNegativePrompt: String(template?.defaultNegativePrompt || ''),

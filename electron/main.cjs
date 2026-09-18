@@ -238,6 +238,30 @@ function syncBundledPromptTemplates(dataDir) {
     const userFile = path.join(dataDir, name)
     if (fs.existsSync(bundledFile) && !fs.existsSync(userFile)) fs.copyFileSync(bundledFile, userFile)
   }
+  // Local defaults also track IDs already offered to this installation.
+  // Append newly shipped IDs only; preserve edits and intentional deletions.
+  const defaultsFile = path.join(dataDir, 'builtin-prompt-templates.defaults.json')
+  const activeFile = path.join(dataDir, 'builtin-prompt-templates.json')
+  const bundledDefaultsFile = path.join(process.resourcesPath, 'data', 'builtin-prompt-templates.defaults.json')
+  if (fs.existsSync(bundledDefaultsFile)) {
+    const bundled = JSON.parse(fs.readFileSync(bundledDefaultsFile, 'utf8'))
+    const defaults = JSON.parse(fs.readFileSync(defaultsFile, 'utf8'))
+    const knownIds = new Set(defaults.map((item) => item.id))
+    const additions = bundled.filter((item) => {
+      if (!item.id || knownIds.has(item.id)) return false
+      knownIds.add(item.id)
+      return true
+    })
+    if (additions.length) {
+      const active = JSON.parse(fs.readFileSync(activeFile, 'utf8'))
+      const activeIds = new Set(active.map((item) => item.id))
+      const missing = additions.filter((item) => !activeIds.has(item.id))
+      if (missing.length) {
+        fs.writeFileSync(activeFile, JSON.stringify([...active, ...missing], null, 2), 'utf8')
+      }
+      fs.writeFileSync(defaultsFile, JSON.stringify([...defaults, ...additions], null, 2), 'utf8')
+    }
+  }
   // Versions before the split stored function rules in the user preset file.
   const userFile = path.join(dataDir, 'prompt-templates.json')
   const builtInFile = path.join(dataDir, 'builtin-prompt-templates.json')
