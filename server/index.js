@@ -6,6 +6,14 @@ import dns from 'node:dns/promises'
 import net from 'node:net'
 import {fileURLToPath} from 'node:url'
 import {createPersonMask, visionStatus, parseDataUrl} from './vision/index.js'
+import {createRequire} from 'node:module'
+
+const require = createRequire(import.meta.url)
+let sharpRuntime
+function sharp() {
+    if (!sharpRuntime) sharpRuntime = require('sharp')
+    return sharpRuntime
+}
 
 const dataDir = process.env.PHANTOMTOWER_DATA_DIR || path.join(path.dirname(fileURLToPath(import.meta.url)), '../data')
 const generatedDir = path.join(dataDir, 'generated')
@@ -158,6 +166,24 @@ async function migrateSettings() {
         await write(files.settings, {...current, schemaVersion: 3, apis, activeModelId: current.activeModelId || '', preferences: current.preferences || {}, storage: current.storage || {}})
     }
     return {...current, schemaVersion: 3, apis, activeModelId: current.activeModelId || ''}
+}
+
+async function restoreExportDir() {
+    const settings = await migrateSettings()
+    const savedExportDir = settings.storage?.exportDir
+    if (!savedExportDir) {
+        await fs.mkdir(exportDir, {recursive: true})
+        return
+    }
+    try {
+        const restoredExportDir = configuredExportDir(savedExportDir)
+        await fs.mkdir(restoredExportDir, {recursive: true})
+        exportDir = restoredExportDir
+    } catch (error) {
+        exportDir = configuredExportDir('')
+        await fs.mkdir(exportDir, {recursive: true})
+        console.warn(`无法恢复已保存的导出目录，已使用默认目录：${error.message}`)
+    }
 }
 
 function wait(ms) {
@@ -1363,6 +1389,70 @@ function generatedUrl(filename) {
     return `http://127.0.0.1:4317/api/generated/${encodeURIComponent(filename)}`
 }
 
+async function processTextureImage(url, options = {}) {
+    const resolvedUrl = await resolveReferenceImage(url)
+    if (!resolvedUrl) throw new Error('图片资源不存在或已失效')
+    const source = await getDownloadImage(resolvedUrl)
+    const level = ['low', 'medium', 'high'].includes(options.level) ? options.level : 'low'
+    const settings = {
+        low: {noise: 1.2, scale: 1.008, quality: 92},
+        medium: {noise: 2.1, scale: 1.012, quality: 89},
+        high: {noise: 3.2, scale: 1.016, quality: 86}
+    }[level]
+    const metadataOnly = options.mode === 'metadata'
+    const format = ['jpg', 'png', 'webp'].includes(String(options.format || '').toLowerCase())
+        ? String(options.format).toLowerCase() : 'jpg'
+    const noise = metadataOnly ? 0 : Math.max(0, Math.min(5, Number(options.noise ?? settings.noise)))
+    const quality = Math.max(70, Math.min(98, Number(options.quality ?? settings.quality)))
+    const image = sharp()(source.buffer, {failOn: 'none'}).rotate()
+    const metadata = await image.metadata()
+    const width = Number(metadata.width || 0)
+    const height = Number(metadata.height || 0)
+    let pipeline = image
+    if (!metadataOnly && width > 0 && height > 0 && settings.scale > 1) {
+        pipeline = pipeline.resize({width: Math.round(width * settings.scale), height: Math.round(height * settings.scale), fit: 'fill', kernel: 'cubic'})
+            .resize({width, height, fit: 'fill', kernel: 'cubic'})
+    }
+    if (noise > 0) {
+        const raw = await pipeline.removeAlpha().raw().toBuffer({resolveWithObject: true})
+        for (let i = 0; i < raw.data.length; i += raw.info.channels) {
+            const seed = (Math.random() + Math.random() + Math.random() - 1.5) * noise
+            for (let channel = 0; channel < Math.min(3, raw.info.channels); channel++) {
+                raw.data[i + channel] = Math.max(0, Math.min(255, Math.round(raw.data[i + channel] + seed * (channel === 1 ? 0.8 : 1))))
+            }
+        }
+        pipeline = sharp()(raw.data, {raw: raw.info})
+    }
+    let encoded
+    if (format === 'png') encoded = pipeline.png({compressionLevel: 8, palette: false, withMetadata: false})
+    else if (format === 'webp') encoded = pipeline.webp({quality, effort: 4, withMetadata: false})
+    else encoded = pipeline.jpeg({quality, mozjpeg: true, chromaSubsampling: '4:4:4', withMetadata: false})
+    const output = await encoded.toBuffer()
+    const extension = format === 'jpg' ? 'jpg' : format
+    const contentType = format === 'jpg' ? 'image/jpeg' : `image/${format}`
+    const filename = `texture-${exportStamp()}.${extension}`
+    await fs.mkdir(generatedDir, {recursive: true})
+    await fs.writeFile(path.join(generatedDir, filename), output)
+    return {url: generatedUrl(filename), filename, contentType, width, height, level, format, mode: metadataOnly ? 'metadata' : 'texture', metadataCleaned: true}
+}
+
+async function inspectImageMetadata(url) {
+    const resolvedUrl = await resolveReferenceImage(url)
+    if (!resolvedUrl) throw new Error('图片资源不存在或已失效')
+    const source = await getDownloadImage(resolvedUrl)
+    const metadata = await sharp()(source.buffer, {failOn: 'none'}).metadata()
+    const keys = ['exif', 'icc', 'iptc', 'xmp', 'tifftagPhotoshop', 'comments']
+    return {
+        width: Number(metadata.width || 0),
+        height: Number(metadata.height || 0),
+        format: metadata.format || source.contentType,
+        orientation: metadata.orientation || null,
+        hasAlpha: Boolean(metadata.hasAlpha),
+        metadataKeys: keys.filter((key) => metadata[key]),
+        metadataCount: keys.filter((key) => metadata[key]).length
+    }
+}
+
 async function resolveRecordImage(image) {
     const currentUrl = normalizeImageUrl(image?.url)
     if (currentUrl.startsWith('http://127.0.0.1:4317/api/generated/')) {
@@ -1566,6 +1656,8 @@ await repairStoredImageExtensions()
 
 // The renderer and persisted local URLs use this fixed application port.
 const serverPort = 4317
+await restoreExportDir()
+
 http.createServer(async (req, res) => {
     res.req = req
     if (req.method === 'OPTIONS') {
@@ -1578,6 +1670,21 @@ http.createServer(async (req, res) => {
         if (requiresServerAuth(req) && !authorized(req)) return send(res, 401, {error: '本地服务认证失败', code: 'LOCAL_AUTH_REQUIRED'})
         if (req.url === '/api/health' && req.method === 'GET') return send(res, 200, {ok: true, dataDir, exportDir})
         if (req.url === '/api/vision/status' && req.method === 'GET') return send(res, 200, await visionStatus())
+        if (req.url === '/api/image/texture-process' && req.method === 'POST') {
+            const input = await json(req)
+            if (!input.url || typeof input.url !== 'string') return send(res, 400, {error: '图片地址不能为空', code: 'INVALID_IMAGE_URL'})
+            try {
+                return send(res, 200, {ok: true, ...(await processTextureImage(input.url, input))})
+            } catch (error) {
+                return send(res, 422, {ok: false, error: error.message || '图片处理失败', code: 'IMAGE_PROCESS_FAILED'})
+            }
+        }
+        if (req.url === '/api/image/metadata' && req.method === 'POST') {
+            const input = await json(req)
+            if (!input.url || typeof input.url !== 'string') return send(res, 400, {error: '图片地址不能为空', code: 'INVALID_IMAGE_URL'})
+            try { return send(res, 200, {ok: true, ...(await inspectImageMetadata(input.url))}) }
+            catch (error) { return send(res, 422, {ok: false, error: error.message || '图片信息读取失败', code: 'IMAGE_METADATA_FAILED'}) }
+        }
         if (req.url === '/api/assets/upload' && req.method === 'POST') {
             const form = await multipartForm(req)
             const file = form.get('file')

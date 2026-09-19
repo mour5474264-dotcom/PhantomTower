@@ -291,6 +291,25 @@ export async function prepareEditImage(url) {
     }, '编辑基础图准备失败')
 }
 
+export async function processTextureImage(url, options = {}) {
+    const {signal, ...payload} = options
+    return request('/api/image/texture-process', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({url, ...payload}),
+        signal
+    }, '图片质感处理失败')
+}
+
+export async function inspectImageMetadata(url, options = {}) {
+    return request('/api/image/metadata', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({url}),
+        signal: options.signal
+    }, '图片信息读取失败')
+}
+
 export async function downloadImage(url, filename = 'atelier-image.png') {
     const response = await fetch(`${BASE}/api/save-image`, await requestOptions({method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({url, filename})}))
     const data = await response.json().catch(() => ({}))

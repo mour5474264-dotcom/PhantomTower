@@ -15,6 +15,8 @@ import {
   cancelGeneration,
   exportImages,
   prepareEditImage,
+  processTextureImage,
+  inspectImageMetadata,
   formatApiError,
   normalizeImageUrl
 } from '../api'
@@ -256,6 +258,33 @@ const selected = ref(new Set())
 const cancelledTaskIds = new Set()
 const exporting = ref(false)
 const preparingEdit = ref(false)
+const textureDialog = ref(false)
+const textureLevel = ref('low')
+const textureMode = ref('texture')
+const textureFormat = ref('jpg')
+const textureQuality = ref(92)
+const textureNoise = ref(1.2)
+const texturePreview = ref('')
+const texturePreviewing = ref(false)
+const textureProcessing = ref(false)
+const textureProgress = ref(0)
+const textureProgressTotal = ref(0)
+const textureError = ref('')
+const textureFileInput = ref(null)
+const textureUploadedSources = ref([])
+const textureUploadedPreviews = ref([])
+const textureMetadata = ref(null)
+let textureAbortController = null
+const textureSource = computed(() => {
+  if (textureUploadedSources.value.length) return textureUploadedPreviews.value[0] || textureUploadedSources.value[0]
+  const index = [...selected.value].sort((a, b) => a - b)[0]
+  const item = results.value[index]
+  return item?.exportUrl || item?.localUrl || item?.url || ''
+})
+const textureProcessSource = computed(() => {
+  if (textureUploadedSources.value.length) return textureUploadedSources.value[0]
+  return textureSource.value
+})
 const allResultsSelected = computed(() => results.value.length > 0 && selected.value.size === results.value.length)
 const selectedLoadingCount = computed(() => [...selected.value].filter((index) => results.value[index]?.loading).length)
 const selectedRemovableCount = computed(() => [...selected.value].filter((index) => {
@@ -1610,6 +1639,148 @@ async function exportSelected() {
   }
 }
 
+function openTextureDialog() {
+  clearTextureUploads()
+  if (!textureSource.value || running.value) return
+  textureDialog.value = true
+  texturePreview.value = ''
+  textureError.value = ''
+  textureMetadata.value = null
+  const urls = [...selected.value].sort((a, b) => a - b).map((index) => {
+    const item = results.value[index]
+    return item?.exportUrl || item?.localUrl || item?.url
+  }).filter(Boolean)
+  Promise.all(urls.map((url) => inspectImageMetadata(url).catch(() => null))).then((items) => {
+    const valid = items.filter(Boolean)
+    if (!valid.length) return
+    textureMetadata.value = {
+      first: valid[0],
+      count: urls.length,
+      formatMixed: new Set(valid.map((item) => item.format)).size > 1,
+      dimensionsMixed: new Set(valid.map((item) => `${item.width}x${item.height}`)).size > 1,
+      metadataImages: valid.filter((item) => item.metadataCount > 0).length
+    }
+  })
+  void previewTexture()
+}
+
+function openTextureBatchPage() {
+  const urls = [...selected.value].sort((a, b) => a - b).map((index) => {
+    const item = results.value[index]
+    return item?.exportUrl || item?.localUrl || item?.url
+  }).filter(Boolean)
+  if (!urls.length) return
+  sessionStorage.setItem('phantom-tower-texture-selection', JSON.stringify(urls))
+  window.location.hash = '#/texture'
+}
+
+function chooseTextureFile() {
+  textureFileInput.value?.click()
+}
+
+async function onTextureFileChange(event) {
+  const files = [...(event.target?.files || [])]
+  event.target.value = ''
+  if (!files.length) return
+  textureError.value = ''
+  try {
+    const uploaded = await Promise.all(files.map(async (file) => {
+      const result = await uploadImageAsset(file)
+      if (!result?.assetId) throw new Error(`图片“${file.name}”上传失败`)
+      return {assetId: result.assetId, preview: URL.createObjectURL(file)}
+    }))
+    clearTextureUploads()
+    textureUploadedSources.value = uploaded.map((item) => item.assetId)
+    textureUploadedPreviews.value = uploaded.map((item) => item.preview)
+    selected.value = new Set()
+    textureDialog.value = true
+    texturePreview.value = ''
+    textureMetadata.value = null
+    const metadataItems = await Promise.all(textureUploadedSources.value.map((source) => inspectImageMetadata(source).catch(() => null)))
+    const valid = metadataItems.filter(Boolean)
+    textureMetadata.value = valid.length ? {first: valid[0], count: files.length, formatMixed: new Set(valid.map((item) => item.format)).size > 1, dimensionsMixed: new Set(valid.map((item) => `${item.width}x${item.height}`)).size > 1, metadataImages: valid.filter((item) => item.metadataCount > 0).length} : null
+    await previewTexture()
+  } catch (exception) {
+    textureError.value = formatApiError(exception, '图片导入失败')
+  }
+}
+
+async function previewTexture() {
+  if (!textureSource.value || texturePreviewing.value) return
+  texturePreviewing.value = true
+  textureError.value = ''
+  try {
+    const result = await processTextureImage(textureProcessSource.value, {
+      mode: textureMode.value, format: textureFormat.value, level: textureLevel.value, quality: textureQuality.value, noise: textureNoise.value
+    })
+    texturePreview.value = result.url
+  } catch (exception) {
+    textureError.value = formatApiError(exception, '预览处理失败')
+  } finally { texturePreviewing.value = false }
+}
+
+async function applyTextureProcessing() {
+  const selectedUrls = [...selected.value].sort((a, b) => a - b).map((index) => {
+    const item = results.value[index]
+    return item?.exportUrl || item?.localUrl || item?.url
+  }).filter(Boolean)
+  const urls = selectedUrls.length ? selectedUrls : textureUploadedSources.value
+  if (!urls.length || textureProcessing.value) return
+  textureProcessing.value = true
+  textureAbortController = new AbortController()
+  textureProgress.value = 0
+  textureProgressTotal.value = urls.length
+  textureError.value = ''
+  try {
+    const outputs = []
+    for (let index = 0; index < urls.length; index += 1) {
+      const url = urls[index]
+      outputs.push(await processTextureImage(url, {mode: textureMode.value, format: textureFormat.value, level: textureLevel.value, quality: textureQuality.value, noise: textureNoise.value, signal: textureAbortController.signal}))
+      textureProgress.value = index + 1
+    }
+    const exported = await exportImages(outputs.map((item) => item.url), textureFormat.value)
+    const firstIndex = results.value.length
+    results.value.push(...outputs.map((output, index) => ({
+      id: `texture-${Date.now()}-${index}`,
+      loading: false,
+      status: 'completed',
+      imageLoading: false,
+      url: output.url,
+      exportUrl: output.url,
+      label: '自然质感',
+      version: 1,
+      requestSnapshot: null
+    })))
+    selected.value = new Set(outputs.map((_, index) => firstIndex + index))
+    textureDialog.value = false
+    showMessage('success', `已处理并导出 ${exported.count} 张图片到 ${exported.exportDir || '本地导出目录'}`)
+  } catch (exception) {
+    if (exception?.name === 'AbortError') {
+      textureError.value = `已取消处理，已完成 ${textureProgress.value} 张。`
+    } else {
+      textureError.value = formatApiError(exception, '批量处理失败')
+    }
+  } finally {
+    textureAbortController = null
+    textureProcessing.value = false
+    textureProgress.value = 0
+    textureProgressTotal.value = 0
+  }
+}
+
+function cancelTextureProcessing() {
+  textureAbortController?.abort()
+}
+
+function clearTextureUploads() {
+  textureUploadedSources.value.forEach((_, index) => {
+    const preview = textureUploadedPreviews.value[index]
+    if (preview) globalThis.URL.revokeObjectURL(preview)
+  })
+  textureUploadedSources.value = []
+  textureUploadedPreviews.value = []
+}
+
 onMounted(async () => {
   await refresh();
   await restoreHomeMemory()
@@ -1719,6 +1890,8 @@ watch([
   results
 ], scheduleHomeMemoryPersist, {deep: true})
 onBeforeUnmount(() => {
+  textureAbortController?.abort()
+  clearTextureUploads()
   window.removeEventListener('keydown', onKeydown)
   window.removeEventListener('sample-factory-active-api-changed', onActiveApiChanged)
   window.removeEventListener('sample-factory-settings-changed', onActiveApiChanged)
@@ -1741,6 +1914,9 @@ onBeforeUnmount(() => {
         <aside class="task-setup" aria-label="本次生成任务">
           <section class="panel">
             <el-button class="rail-new-task" :icon="Plus" @click="startNewTask">新建任务</el-button>
+            <el-button class="rail-texture-button" type="warning" plain :disabled="running || textureProcessing"
+                       @click="$router.push('/texture')">去 AI 感 · 批量图片</el-button>
+            <input ref="textureFileInput" class="texture-file-input" type="file" accept="image/*" multiple @change="onTextureFileChange">
 
             <h3>{{ isTextMode ? '文字生图' : '图生图' }}</h3>
             <div class="mode-toolbar">
@@ -1941,6 +2117,9 @@ onBeforeUnmount(() => {
           <el-button :icon="Download" :loading="exporting" :disabled="!selected.size || exporting || preparingEdit"
                      @click="exportSelected">导出已选
           </el-button>
+          <el-button type="warning" :disabled="!selected.size || running || textureProcessing"
+                     @click="openTextureBatchPage">去 AI 感
+          </el-button>
           <el-button :icon="PenLine" :loading="preparingEdit"
                      :disabled="selected.size !== 1 || running || preparingEdit"
                      @click="continueEdit">{{ preparingEdit ? '准备编辑图' : '继续编辑' }}
@@ -1995,6 +2174,52 @@ onBeforeUnmount(() => {
         </div>
       </div>
     </section>
+    <el-dialog v-model="textureDialog" title="去 AI 感 · 自然质感处理" width="780px" class="texture-dialog">
+      <div class="texture-disclaimer">这是图像质感与格式处理，不保证绕过任何平台的 AI 识别，也不会伪造相机身份。原图保持不变。</div>
+      <div v-if="textureMetadata" class="texture-metadata-summary">
+        <span>已选 {{ textureMetadata.count }} 张</span>
+        <span>{{ textureMetadata.first.width }} × {{ textureMetadata.first.height }}{{ textureMetadata.dimensionsMixed ? ' 等多种尺寸' : '' }}</span>
+        <span>{{ String(textureMetadata.first.format || '').toUpperCase() }}{{ textureMetadata.formatMixed ? ' 等多种格式' : '' }}</span>
+        <span>{{ textureMetadata.metadataImages ? `${textureMetadata.metadataImages} 张含常见元数据` : '未检测到常见元数据' }}</span>
+      </div>
+      <div class="texture-layout">
+        <div class="texture-preview-panel">
+          <div class="texture-preview-grid">
+            <figure><img v-if="textureSource" :src="textureSource" alt="原图预览"><figcaption>原图</figcaption></figure>
+            <figure><img v-if="texturePreview" :src="texturePreview" alt="处理后预览"><div v-else class="texture-empty">点击预览生成处理效果</div><figcaption>处理后</figcaption></figure>
+          </div>
+        </div>
+        <div class="texture-controls">
+          <label>处理模式</label>
+          <el-radio-group v-model="textureMode" @change="previewTexture">
+            <el-radio-button label="texture">自然质感</el-radio-button><el-radio-button label="metadata">仅清理元数据</el-radio-button>
+          </el-radio-group>
+          <label>输出格式</label>
+          <el-radio-group v-model="textureFormat" @change="previewTexture">
+            <el-radio-button label="jpg">JPG</el-radio-button><el-radio-button label="png">PNG</el-radio-button><el-radio-button label="webp">WebP</el-radio-button>
+          </el-radio-group>
+          <label v-if="textureMode === 'texture'">质感强度</label>
+          <el-radio-group v-if="textureMode === 'texture'" v-model="textureLevel" @change="previewTexture">
+            <el-radio-button label="low">低</el-radio-button><el-radio-button label="medium">中</el-radio-button><el-radio-button label="high">高</el-radio-button>
+          </el-radio-group>
+          <template v-if="textureMode === 'texture'">
+            <label>颗粒强度 <b>{{ textureNoise.toFixed(1) }}</b></label>
+            <el-slider v-model="textureNoise" :min="0" :max="5" :step="0.1" @change="previewTexture"/>
+          </template>
+          <label>JPEG 质量 <b>{{ textureQuality }}</b></label>
+          <el-slider v-model="textureQuality" :min="70" :max="98" :step="1" @change="previewTexture"/>
+          <p class="texture-note">{{ textureMode === 'metadata' ? '只重新编码并清理常见元数据，不改变画面内容。' : '处理包含轻微重采样、彩色感光噪点和 JPEG 重编码，并会移除原文件元数据。' }}</p>
+          <p v-if="textureError" class="texture-error">{{ textureError }}</p>
+        </div>
+      </div>
+      <template #footer>
+        <el-button @click="textureDialog = false">取消</el-button>
+        <el-button :loading="texturePreviewing" @click="previewTexture">预览效果</el-button>
+        <el-button v-if="textureProcessing" @click="cancelTextureProcessing">取消处理</el-button>
+        <el-button v-else type="warning" @click="applyTextureProcessing">处理并导出已选</el-button>
+        <span v-if="textureProcessing" class="texture-progress">正在处理 {{ textureProgress }} / {{ textureProgressTotal }}</span>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -2011,5 +2236,23 @@ onBeforeUnmount(() => {
   line-height: 15px;
   pointer-events: none;
 }
+
+.texture-disclaimer { margin-bottom: 16px; padding: 10px 12px; background: #fff7e8; border-left: 3px solid #c88432; color: #765b36; font-size: 12px; line-height: 1.5; }
+.texture-metadata-summary { display: flex; flex-wrap: wrap; gap: 7px; margin: -5px 0 14px; color: #65736a; font-size: 11px; }
+.texture-metadata-summary span { padding: 5px 8px; background: #f2f4ef; border: 1px solid #dce2d9; border-radius: 3px; }
+.texture-layout { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(220px, .8fr); gap: 18px; }
+.texture-preview-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.texture-preview-grid figure { margin: 0; background: #202624; min-height: 260px; display: flex; flex-direction: column; }
+.texture-preview-grid img { display: block; width: 100%; height: 260px; object-fit: contain; }
+.texture-preview-grid figcaption { padding: 7px 9px; color: #d8e0dc; font-size: 11px; }
+.texture-empty { height: 260px; display: grid; place-items: center; padding: 18px; color: #94a39a; font-size: 12px; text-align: center; }
+.texture-controls { display: grid; align-content: start; gap: 9px; font-size: 12px; }
+.texture-controls label { margin-top: 3px; color: #536158; font-weight: 600; }
+.texture-controls label b { float: right; color: #9a6330; }
+.texture-note { margin: 8px 0 0; color: #7d887f; line-height: 1.5; }
+.texture-error { margin: 0; color: #b34d3f; white-space: pre-wrap; line-height: 1.4; }
+.texture-file-input { display: none; }
+.rail-texture-button { width: 100%; margin: 10px 0 2px; }
+@media (max-width: 700px) { .texture-layout { grid-template-columns: 1fr; } .texture-preview-grid img, .texture-empty { height: 190px; min-height: 190px; } .texture-preview-grid figure { min-height: 220px; } }
 </style>
 
