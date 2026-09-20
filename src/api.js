@@ -298,7 +298,7 @@ export async function processTextureImage(url, options = {}) {
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({url, ...payload}),
         signal
-    }, '图片质感处理失败')
+    }, '图片处理失败')
 }
 
 export async function inspectImageMetadata(url, options = {}) {

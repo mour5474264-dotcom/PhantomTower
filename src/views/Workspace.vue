@@ -259,11 +259,6 @@ const cancelledTaskIds = new Set()
 const exporting = ref(false)
 const preparingEdit = ref(false)
 const textureDialog = ref(false)
-const textureLevel = ref('low')
-const textureMode = ref('texture')
-const textureFormat = ref('jpg')
-const textureQuality = ref(92)
-const textureNoise = ref(1.2)
 const texturePreview = ref('')
 const texturePreviewing = ref(false)
 const textureProcessing = ref(false)
@@ -1711,7 +1706,7 @@ async function previewTexture() {
   textureError.value = ''
   try {
     const result = await processTextureImage(textureProcessSource.value, {
-      mode: textureMode.value, format: textureFormat.value, level: textureLevel.value, quality: textureQuality.value, noise: textureNoise.value
+      mode: 'metadata', format: 'png'
     })
     texturePreview.value = result.url
   } catch (exception) {
@@ -1735,10 +1730,10 @@ async function applyTextureProcessing() {
     const outputs = []
     for (let index = 0; index < urls.length; index += 1) {
       const url = urls[index]
-      outputs.push(await processTextureImage(url, {mode: textureMode.value, format: textureFormat.value, level: textureLevel.value, quality: textureQuality.value, noise: textureNoise.value, signal: textureAbortController.signal}))
+      outputs.push(await processTextureImage(url, {mode: 'metadata', format: 'png', signal: textureAbortController.signal}))
       textureProgress.value = index + 1
     }
-    const exported = await exportImages(outputs.map((item) => item.url), textureFormat.value)
+    const exported = await exportImages(outputs.map((item) => item.url), 'png')
     const firstIndex = results.value.length
     results.value.push(...outputs.map((output, index) => ({
       id: `texture-${Date.now()}-${index}`,
@@ -1747,7 +1742,7 @@ async function applyTextureProcessing() {
       imageLoading: false,
       url: output.url,
       exportUrl: output.url,
-      label: '自然质感',
+      label: '去 AI 识别',
       version: 1,
       requestSnapshot: null
     })))
@@ -1915,7 +1910,7 @@ onBeforeUnmount(() => {
           <section class="panel">
             <el-button class="rail-new-task" :icon="Plus" @click="startNewTask">新建任务</el-button>
             <el-button class="rail-texture-button" type="warning" plain :disabled="running || textureProcessing"
-                       @click="$router.push('/texture')">去 AI 感 · 批量图片</el-button>
+                       @click="$router.push('/texture')">去 AI 识别 · 批量图片</el-button>
             <input ref="textureFileInput" class="texture-file-input" type="file" accept="image/*" multiple @change="onTextureFileChange">
 
             <h3>{{ isTextMode ? '文字生图' : '图生图' }}</h3>
@@ -2118,7 +2113,7 @@ onBeforeUnmount(() => {
                      @click="exportSelected">导出已选
           </el-button>
           <el-button type="warning" :disabled="!selected.size || running || textureProcessing"
-                     @click="openTextureBatchPage">去 AI 感
+                     @click="openTextureBatchPage">去 AI 识别
           </el-button>
           <el-button :icon="PenLine" :loading="preparingEdit"
                      :disabled="selected.size !== 1 || running || preparingEdit"
@@ -2174,8 +2169,8 @@ onBeforeUnmount(() => {
         </div>
       </div>
     </section>
-    <el-dialog v-model="textureDialog" title="去 AI 感 · 自然质感处理" width="780px" class="texture-dialog">
-      <div class="texture-disclaimer">这是图像质感与格式处理，不保证绕过任何平台的 AI 识别，也不会伪造相机身份。原图保持不变。</div>
+    <el-dialog v-model="textureDialog" title="去 AI 识别 · 无损图片处理" width="780px" class="texture-dialog">
+      <div class="texture-disclaimer">清理图片元数据，保留原始尺寸，无损 PNG 输出，不添加颗粒。</div>
       <div v-if="textureMetadata" class="texture-metadata-summary">
         <span>已选 {{ textureMetadata.count }} 张</span>
         <span>{{ textureMetadata.first.width }} × {{ textureMetadata.first.height }}{{ textureMetadata.dimensionsMixed ? ' 等多种尺寸' : '' }}</span>
@@ -2190,25 +2185,9 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <div class="texture-controls">
-          <label>处理模式</label>
-          <el-radio-group v-model="textureMode" @change="previewTexture">
-            <el-radio-button label="texture">自然质感</el-radio-button><el-radio-button label="metadata">仅清理元数据</el-radio-button>
-          </el-radio-group>
-          <label>输出格式</label>
-          <el-radio-group v-model="textureFormat" @change="previewTexture">
-            <el-radio-button label="jpg">JPG</el-radio-button><el-radio-button label="png">PNG</el-radio-button><el-radio-button label="webp">WebP</el-radio-button>
-          </el-radio-group>
-          <label v-if="textureMode === 'texture'">质感强度</label>
-          <el-radio-group v-if="textureMode === 'texture'" v-model="textureLevel" @change="previewTexture">
-            <el-radio-button label="low">低</el-radio-button><el-radio-button label="medium">中</el-radio-button><el-radio-button label="high">高</el-radio-button>
-          </el-radio-group>
-          <template v-if="textureMode === 'texture'">
-            <label>颗粒强度 <b>{{ textureNoise.toFixed(1) }}</b></label>
-            <el-slider v-model="textureNoise" :min="0" :max="5" :step="0.1" @change="previewTexture"/>
-          </template>
-          <label>JPEG 质量 <b>{{ textureQuality }}</b></label>
-          <el-slider v-model="textureQuality" :min="70" :max="98" :step="1" @change="previewTexture"/>
-          <p class="texture-note">{{ textureMode === 'metadata' ? '只重新编码并清理常见元数据，不改变画面内容。' : '处理包含轻微重采样、彩色感光噪点和 JPEG 重编码，并会移除原文件元数据。' }}</p>
+          <label>输出方式</label>
+          <p class="texture-note">原尺寸 · 无损 PNG · 清理元数据</p>
+          <p class="texture-note">不缩放图片，不添加颗粒，不进行有损压缩。文件体积可能增大。</p>
           <p v-if="textureError" class="texture-error">{{ textureError }}</p>
         </div>
       </div>

@@ -125,7 +125,7 @@ onUnmounted(() => {
     <div class="brand"><span class="mark">S</span><div><b>样片工厂</b><small>Sample Factory</small></div></div>
     <nav aria-label="功能导航">
       <RouterLink to="/"><Images :size="17" />创作工作台</RouterLink>
-      <RouterLink to="/texture"><SlidersHorizontal :size="17" />去 AI 感</RouterLink>
+      <RouterLink to="/texture"><SlidersHorizontal :size="17" />去 AI 识别</RouterLink>
       <RouterLink to="/presets"><Settings2 :size="17" />提示词预设</RouterLink>
       <RouterLink to="/history"><History :size="17" />生成记录</RouterLink>
       <RouterLink to="/apis"><Server :size="17" />API 管理</RouterLink>

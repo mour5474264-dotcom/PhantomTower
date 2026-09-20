@@ -7,7 +7,7 @@ function workbench(process) {
   const source = readFileSync(new URL('../src/views/Texture.vue', import.meta.url), 'utf8')
     .match(/<script setup>([\s\S]*?)<\/script>/)[1].replace(/^import .*$/gm, '')
   return new Function('ref', 'computed', 'onBeforeUnmount', 'onMounted', 'ElMessage', 'uploadImageAsset', 'processTextureImage', 'exportImages', 'URL',
-    `${source}\nreturn {items,addFiles,processBatch,stopping,running,save,notice}`)(
+    `${source}\nreturn {items,addFiles,processBatch,stopping,running,save,notice,removeSelected,clearAll,selectFailed}`)(
     ref, computed, () => {}, () => {}, {success() {}}, async file => ({assetId: file.name}), process,
     async urls => ({count: urls.length, exportDir: 'test'}), {createObjectURL: file => `blob:${file.name}`, revokeObjectURL() {}})
 }
@@ -35,4 +35,22 @@ test('stop finishes current image and leaves remaining images pending', async ()
   await page.processBatch()
   assert.deepEqual(page.items.value.map(item => item.status), ['done','ready'])
   assert.equal(page.running.value, false)
+})
+
+test('failed selection and bulk deletion preserve other images; clear removes remaining rows', async () => {
+  const page = workbench(async asset => {
+    if (asset === 'b.png') throw new Error('failed')
+    return {url: `output:${asset}`}
+  })
+  await page.addFiles([file('a.png'), file('b.png'), file('c.png')])
+  page.selectFailed()
+  assert.deepEqual(page.items.value.map(item => item.selected), [false, true, false])
+  page.removeSelected()
+  assert.deepEqual(page.items.value.map(item => item.asset), ['a.png', 'c.png'])
+  page.running.value = true
+  page.clearAll()
+  assert.equal(page.items.value.length, 2)
+  page.running.value = false
+  page.clearAll()
+  assert.equal(page.items.value.length, 0)
 })

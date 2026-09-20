@@ -10,8 +10,21 @@ import {createRequire} from 'node:module'
 
 const require = createRequire(import.meta.url)
 let sharpRuntime
+function loadPackage(name) {
+    const candidates = [name]
+    if (process.resourcesPath) {
+        candidates.push(path.join(process.resourcesPath, 'app.asar', 'node_modules', name))
+        candidates.push(path.join(process.resourcesPath, 'app', 'node_modules', name))
+    }
+    let lastError
+    for (const candidate of candidates) {
+        try { return require(candidate) } catch (error) { lastError = error }
+    }
+    throw lastError || new Error(`无法加载 ${name}`)
+}
+
 function sharp() {
-    if (!sharpRuntime) sharpRuntime = require('sharp')
+    if (!sharpRuntime) sharpRuntime = loadPackage('sharp')
     return sharpRuntime
 }
 
@@ -1393,47 +1406,16 @@ async function processTextureImage(url, options = {}) {
     const resolvedUrl = await resolveReferenceImage(url)
     if (!resolvedUrl) throw new Error('图片资源不存在或已失效')
     const source = await getDownloadImage(resolvedUrl)
-    const level = ['low', 'medium', 'high'].includes(options.level) ? options.level : 'low'
-    const settings = {
-        low: {noise: 1.2, scale: 1.008, quality: 92},
-        medium: {noise: 2.1, scale: 1.012, quality: 89},
-        high: {noise: 3.2, scale: 1.016, quality: 86}
-    }[level]
-    const metadataOnly = options.mode === 'metadata'
-    const format = ['jpg', 'png', 'webp'].includes(String(options.format || '').toLowerCase())
-        ? String(options.format).toLowerCase() : 'jpg'
-    const noise = metadataOnly ? 0 : Math.max(0, Math.min(5, Number(options.noise ?? settings.noise)))
-    const quality = Math.max(70, Math.min(98, Number(options.quality ?? settings.quality)))
+    // Decode at the original dimensions and write lossless PNG without metadata.
+    // Ignore legacy quality/noise/format options so older clients cannot degrade images.
     const image = sharp()(source.buffer, {failOn: 'none'}).rotate()
-    const metadata = await image.metadata()
-    const width = Number(metadata.width || 0)
-    const height = Number(metadata.height || 0)
-    let pipeline = image
-    if (!metadataOnly && width > 0 && height > 0 && settings.scale > 1) {
-        pipeline = pipeline.resize({width: Math.round(width * settings.scale), height: Math.round(height * settings.scale), fit: 'fill', kernel: 'cubic'})
-            .resize({width, height, fit: 'fill', kernel: 'cubic'})
-    }
-    if (noise > 0) {
-        const raw = await pipeline.removeAlpha().raw().toBuffer({resolveWithObject: true})
-        for (let i = 0; i < raw.data.length; i += raw.info.channels) {
-            const seed = (Math.random() + Math.random() + Math.random() - 1.5) * noise
-            for (let channel = 0; channel < Math.min(3, raw.info.channels); channel++) {
-                raw.data[i + channel] = Math.max(0, Math.min(255, Math.round(raw.data[i + channel] + seed * (channel === 1 ? 0.8 : 1))))
-            }
-        }
-        pipeline = sharp()(raw.data, {raw: raw.info})
-    }
-    let encoded
-    if (format === 'png') encoded = pipeline.png({compressionLevel: 8, palette: false, withMetadata: false})
-    else if (format === 'webp') encoded = pipeline.webp({quality, effort: 4, withMetadata: false})
-    else encoded = pipeline.jpeg({quality, mozjpeg: true, chromaSubsampling: '4:4:4', withMetadata: false})
-    const output = await encoded.toBuffer()
-    const extension = format === 'jpg' ? 'jpg' : format
-    const contentType = format === 'jpg' ? 'image/jpeg' : `image/${format}`
-    const filename = `texture-${exportStamp()}.${extension}`
+    const {data: output, info} = await image.png({compressionLevel: 0, palette: false})
+        .toBuffer({resolveWithObject: true})
+    const filename = `texture-${exportStamp()}-${crypto.randomUUID()}.png`
     await fs.mkdir(generatedDir, {recursive: true})
     await fs.writeFile(path.join(generatedDir, filename), output)
-    return {url: generatedUrl(filename), filename, contentType, width, height, level, format, mode: metadataOnly ? 'metadata' : 'texture', metadataCleaned: true}
+    return {url: generatedUrl(filename), filename, contentType: 'image/png', width: info.width, height: info.height,
+        format: 'png', mode: 'metadata', metadataCleaned: true}
 }
 
 async function inspectImageMetadata(url) {
