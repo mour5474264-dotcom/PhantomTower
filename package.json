@@ -28,7 +28,6 @@
       "repo": "PhantomTower",
       "releaseType": "release"
     },
-    "electronDist": "C:\\electron-local\\electron-v43.3.0-win32-x64",
     "electronDownload": {
       "mirror": "https://npmmirror.com/mirrors/electron/"
     },
