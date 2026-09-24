@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import {normalizeImageFile, droppedFiles} from '../src/utils/image-drop.mjs'
+import {
+  GENERATED_IMAGE_DRAG_TYPE,
+  normalizeImageFile,
+  droppedFiles,
+  droppedGeneratedImageUrl,
+  setGeneratedImageDrag
+} from '../src/utils/image-drop.mjs'
 
 test('native drops with missing MIME retain bytes and gain an image type', async () => {
   for (const type of ['', 'application/octet-stream']) {
@@ -27,4 +33,18 @@ test('drop reads file lists once without duplicating items and falls back to fil
   assert.deepEqual(droppedFiles({files: [file], items: [item]}), [file])
   assert.deepEqual(droppedFiles({files: [], items: [item, {kind: 'string'}, {kind: 'file', getAsFile: () => null}]}), [file])
   assert.deepEqual(droppedFiles(null), [])
+})
+
+test('generated image drag preserves a Safari-compatible namespaced fallback', () => {
+  const data = new Map()
+  const transfer = {
+    setData: (type, value) => data.set(type, value),
+    getData: (type) => data.get(type) || ''
+  }
+  setGeneratedImageDrag(transfer, 'http://127.0.0.1:4317/api/generated/sample.png')
+  assert.equal(transfer.effectAllowed, 'copy')
+  assert.equal(data.get(GENERATED_IMAGE_DRAG_TYPE), 'http://127.0.0.1:4317/api/generated/sample.png')
+  assert.equal(droppedGeneratedImageUrl(transfer), 'http://127.0.0.1:4317/api/generated/sample.png')
+  assert.equal(droppedGeneratedImageUrl({getData: (type) => type === 'text/plain' ? 'phantom-tower-generated-image:data:image/png;base64,abc' : ''}), 'data:image/png;base64,abc')
+  assert.equal(droppedGeneratedImageUrl({getData: (type) => type === 'text/plain' ? 'https://untrusted.example/image.png' : ''}), '')
 })

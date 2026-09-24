@@ -2,8 +2,9 @@
 import {ref, computed, onMounted, onBeforeUnmount, onActivated, markRaw, watch} from 'vue'
 import {Delete, Upload, Refresh, VideoPlay, Download, SwitchButton} from '@element-plus/icons-vue'
 import {ElMessage} from 'element-plus'
-import {X, Plus, ImagePlus, PenLine} from 'lucide-vue-next'
-import {normalizeImageFile, droppedFiles} from '../utils/image-drop.mjs'
+import {X, Plus, ImagePlus, PenLine, FileVideo} from 'lucide-vue-next'
+import {normalizeImageFile, droppedFiles, droppedGeneratedImageUrl, setGeneratedImageDrag} from '../utils/image-drop.mjs'
+import {extractVideoReferences} from '../utils/video-reference.mjs'
 import {
   getSettings,
   getModels,
@@ -51,10 +52,15 @@ const generationControllers = new Map()
 const activeGenerationWorks = new Set()
 const queuedCount = ref(0)
 const preview = ref('')
-const materials = ref({person: [], pose: [], prop: [], scene: [], reference: [], batchReference: [], editReference: [], clothingPerson: [], clothing: []})
+const materials = ref({person: [], pose: [], prop: [], scene: [], reference: [], videoReference: [], batchReference: [], editReference: [], clothingPerson: [], clothing: []})
 const mode = ref('text')
 const isTextMode = computed(() => mode.value === 'text')
 const imageOperation = ref('batch')
+const threeViewSource = ref('image')
+const threeViewMaterialKey = computed(() => threeViewSource.value === 'video' ? 'videoReference' : 'reference')
+const videoImporting = ref(false)
+const videoImportProgress = ref(0)
+let videoImportController = null
 const personReplaceVariant = ref('double')
 const visibleImageOperations = ['batch', 'three-view', 'edit', 'clothing-replace']
 const clothingScope = ref('outfit')
@@ -315,7 +321,7 @@ const expectedFormula = computed(() => {
   const copies = Math.max(1, Number(count.value || 1))
   if (isTextMode.value) return `1 个文字任务 x ${copies}`
   if (imageOperation.value === 'batch') return `${materials.value.reference.length} 张目标图 x ${copies}`
-  if (imageOperation.value === 'three-view') return `1 组（${materials.value.reference.length} 张参考图）x ${copies} 张成图`
+  if (imageOperation.value === 'three-view') return `1 组（${materials.value[threeViewMaterialKey.value].length} 张参考图）x ${copies} 张成图`
   return `1 个${operationLabel()}任务 x ${copies}`
 })
 const expectedState = computed(() => {
@@ -393,8 +399,8 @@ const activeMaterialTypes = computed(() => {
         hint: personReplaceVariant.value === 'single' ? '用于固定一个人物的身份、脸部与服装' : '按目标图位置固定两个人物的身份、脸部与服装'
       }
       : item.key === 'reference' && imageOperation.value === 'three-view'
-          ? {...item, label: '人物参考图', step: '必填', required: true,
-            hint: '上传同一个人的全身、脸部、侧面或背面照片，所有图片共同生成一张角色设定图。可在提示词中指定某张图用于服装或体型参考。'}
+          ? {...item, key: threeViewMaterialKey.value, label: threeViewSource.value === 'video' ? '人物视频' : '人物参考图', step: '必填', required: true,
+            hint: threeViewSource.value === 'video' ? '' : '上传同一个人的全身、脸部、侧面或背面照片，所有图片共同生成一张角色设定图。可在提示词中指定某张图用于服装或体型参考。'}
           : item)
 })
 
@@ -661,6 +667,7 @@ function makeHomeMemorySnapshot() {
       customHeight: customHeight.value,
       mode: mode.value,
       imageOperation: imageOperation.value,
+      threeViewSource: threeViewSource.value,
       clothingScope: clothingScope.value,
       replaceObject: replaceObject.value,
       editParent: editParentMemoryItem(editParent.value)
@@ -692,6 +699,7 @@ async function restoreHomeMemory() {
     customHeight.value = form.customHeight ? Number(form.customHeight) : null
     mode.value = form.mode || mode.value
     imageOperation.value = visibleImageOperations.includes(form.imageOperation) ? form.imageOperation : imageOperation.value
+    threeViewSource.value = form.threeViewSource === 'video' ? 'video' : 'image'
     clothingScope.value = Object.hasOwn(clothingScopes, form.clothingScope) ? form.clothingScope : 'outfit'
     replaceObject.value = form.replaceObject || ''
     editParent.value = form.editParent || null
@@ -757,6 +765,7 @@ async function buildLabeledReferences(task, materialSet = materials.value) {
         role: isThreeView ? 'person_reference' : referenceRole(key),
         type: isThreeView ? '人物参考' : materialLabels[key],
         promptLabel: isThreeView ? `人物参考图${index + 1}` : referencePromptLabel(key),
+        videoReferenceRank: isThreeView && key === 'videoReference' ? item.videoReferenceRank : undefined,
         primary: !isThreeView && item === task?.item,
         data: await fileToAssetReference(file)
       })
@@ -882,12 +891,62 @@ async function prepareEditReferenceFile(file) {
 
 async function dropMaterialFiles(key, event) {
   const files = droppedFiles(event.dataTransfer)
+  const generatedImageUrl = droppedGeneratedImageUrl(event.dataTransfer)
+  if (generatedImageUrl) {
+    try {
+      const response = await fetch(generatedImageUrl, {credentials: 'omit', cache: 'no-store'})
+      if (!response.ok) throw new Error(`读取图片失败（${response.status}）`)
+      const blob = await response.blob()
+      if (!blob.type.startsWith('image/')) throw new Error('拖入内容不是图片')
+      const extension = blob.type.split('/')[1]?.replace('jpeg', 'jpg') || 'png'
+      await addFiles(key, new File([blob], `sample-${Date.now()}.${extension}`, {type: blob.type}))
+      return
+    } catch (exception) {
+      error.value = `无法读取生成图片，请稍后重试。${exception?.message ? `（${exception.message}）` : ''}`
+      return
+    }
+  }
   if (!files.length) {
     error.value = '未读取到图片文件，请从 Finder 或文件管理器拖入本地图片，或点击上传。'
     return
   }
   for (const file of files) await addFiles(key, file)
 }
+
+function startResultDrag(event, item) {
+  if (!item?.url) return
+  setGeneratedImageDrag(event.dataTransfer, item.url)
+}
+
+async function importReferenceVideo(upload) {
+  if (videoImporting.value) return
+  const remaining = 30 - materials.value.videoReference.length
+  if (remaining < 1) return showMessage('warning', '人物参考图已达 30 张，请先删除部分图片')
+  videoImporting.value = true
+  videoImportProgress.value = 0
+  const controller = new AbortController()
+  videoImportController = controller
+  try {
+    const frames = await extractVideoReferences(rawFile(upload), {
+      count: Math.min(8, remaining), signal: controller.signal,
+      onProgress: (done, total) => { videoImportProgress.value = Math.round(done / total * 100) }
+    })
+    controller.signal.throwIfAborted()
+    const available = 30 - materials.value.videoReference.length
+    if (frames.length > available) throw new Error('参考图数量已变化，请删除部分图片后重新导入视频')
+    materials.value.videoReference.push(...frames.map(({file, width, height, quality, faceScore}, index) => markRaw({
+      file, name: file.name, size: file.size, width, height, quality, faceScore, videoReferenceRank: index + 1, previewUrl: URL.createObjectURL(file)
+    })))
+    showMessage('success', `已从视频提取 ${frames.length} 张人物参考图`)
+  } catch (exception) {
+    if (exception.name !== 'AbortError') showMessage('error', exception.message || '视频导入失败')
+  } finally {
+    videoImporting.value = false
+    videoImportController = null
+  }
+}
+
+watch([mode, imageOperation, threeViewSource], () => videoImportController?.abort(), {flush: 'sync'})
 
 async function addFiles(key, upload) {
   const file = normalizeImageFile(rawFile(upload));
@@ -1087,7 +1146,9 @@ function buildImageTasks() {
     }))
   }
   if (imageOperation.value === 'three-view') {
-    return target ? [{item: target, type: 'three-view', label: '全身三视图 + 头部多视图', materialKeys: ['reference']}] : []
+    const key = threeViewMaterialKey.value
+    const reference = materials.value[key][0]
+    return reference ? [{item: reference, type: 'three-view', label: '全身三视图 + 头部多视图', materialKeys: [key]}] : []
   }
   if (!target) return []
   if (imageOperation.value === 'fusion') {
@@ -1103,6 +1164,10 @@ function buildImageTasks() {
 }
 
 function imageValidationError() {
+  if (imageOperation.value === 'three-view' && videoImporting.value) return '请等待视频参考帧提取完成'
+  if (imageOperation.value === 'three-view') {
+    return materials.value[threeViewMaterialKey.value].length ? '' : threeViewSource.value === 'video' ? '请上传人物视频' : '请上传人物参考图'
+  }
   if (imageOperation.value === 'clothing-replace') {
     if (materials.value.clothingPerson.length !== 1) return '服装替换需要上传一张人物图'
     if (materials.value.clothing.length !== 1) return '服装替换需要上传一张服装参考图'
@@ -1128,8 +1193,8 @@ function buildMaterialPrompt(labeled, taskType = 'text', taskLabel = '提示词�
   if (taskType === 'three-view') {
     return [
       '【多图融合角色设定图：只生成一张完整成图】',
-      ...labeled.map((item, index) => `图片${index + 1}：${item.promptLabel}（同一个人的参考照片）`),
-      '综合全部参考图识别同一个人物，脸部照片提供五官与骨相，全身照片提供体型和服装，侧面及背面照片补充轮廓和发型。所有图片共同参与同一个任务，不逐张生成，不将多张参考理解为多个人，也不沿用第一张照片的构图。',
+      ...labeled.map((item, index) => `图片${index + 1}：${item.promptLabel}（同一个人的参考照片${item.videoReferenceRank ? `，视频人脸优选参考第${item.videoReferenceRank}位` : ''}）`),
+      '综合全部参考图识别同一个人物，脸部照片提供五官与骨相，全身照片提供体型和服装，侧面及背面照片补充轮廓和发型。所有图片共同参与同一个任务，不逐张生成，不将多张参考理解为多个人，也不沿用第一张照片的构图。若参考来自视频，以排序靠前、检测到人脸且清晰可见的画面为身份锚点，严格锁定五官比例、脸型、肤色、发际线、发型和体型；其余帧仅补充视角与服装信息，绝不能因表情、运动模糊、压缩噪点、遮挡、滤镜或光线改变而重塑人物身份。',
       '若各图服装或发型不同，优先遵循用户指定的参考图；未指定时服装和体型以第一张清晰全身照片为准，没有全身照时以第一张参考图为准。全部输出视角统一身份、服装、发型和配饰。',
       '布局：左侧并排展示全身正面、90度侧面、背面三视图，从头顶到鞋底完整可见；右侧用两行三列展示头部特写，第一行是正面、45度、90度侧面，第二行是后脑发型、正面自然微笑、正面平静表情。头部特写保留完整头顶、耳部和颈肩，面部清晰。所有视角合在同一张图片中，不输出独立文件。',
       '纯白无缝背景，干净白色间距，无文字、水印或装饰边框；自然彩色、中性影棚光，真实皮肤和发丝细节，保持人物相似度。',
@@ -1877,6 +1942,7 @@ watch([
   customHeight,
   mode,
   imageOperation,
+  threeViewSource,
   clothingScope,
   personReplaceVariant,
   replaceObject,
@@ -1885,6 +1951,7 @@ watch([
   results
 ], scheduleHomeMemoryPersist, {deep: true})
 onBeforeUnmount(() => {
+  videoImportController?.abort()
   textureAbortController?.abort()
   clearTextureUploads()
   window.removeEventListener('keydown', onKeydown)
@@ -1954,6 +2021,12 @@ onBeforeUnmount(() => {
                     personReplaceVariant === 'single' ? '替换目标图中的一个人物，最多使用 1 张人物参考图。' : '按目标图中的位置逐一替换两个人物，最多使用 2 张人物参考图。'
                   }}</small>
               </el-form-item>
+              <el-form-item v-if="imageOperation === 'three-view'" label="素材来源">
+                <el-radio-group v-model="threeViewSource" class="image-operation-options" aria-label="三视图素材来源">
+                  <el-radio-button label="image">上传图片</el-radio-button>
+                  <el-radio-button label="video">上传视频</el-radio-button>
+                </el-radio-group>
+              </el-form-item>
               <div v-for="item in activeMaterialTypes" :key="item.key" class="material-box"
                    :class="{ 'is-primary': item.required, 'has-files': materials[item.key].length }">
                 <div class="material-heading">
@@ -1964,7 +2037,21 @@ onBeforeUnmount(() => {
                   <span class="material-count">{{ materials[item.key].length }}<i>/ {{ item.limit }}</i></span>
                 </div>
                 <p v-if="item.hint">{{ item.hint }}</p>
-                <el-upload class="material-upload" drag action="#" :auto-upload="false" :show-file-list="false"
+                <template v-if="item.key === 'videoReference'">
+                  <el-upload class="material-upload" drag action="#" :auto-upload="false" :show-file-list="false"
+                             :disabled="videoImporting" accept="video/mp4,video/quicktime,video/webm,.mp4,.mov,.webm,.m4v"
+                             @change="importReferenceVideo">
+                    <div class="drop-zone">
+                      <FileVideo :size="15" aria-hidden="true"/>
+                      <span>{{ videoImporting ? '正在提取视频画面...' : '上传人物视频' }}</span>
+                    </div>
+                  </el-upload>
+                  <div v-if="videoImporting" role="status" aria-live="polite">
+                    <el-progress :percentage="videoImportProgress"/>
+                    <el-button text @click="videoImportController?.abort()">取消导入</el-button>
+                  </div>
+                </template>
+                <el-upload v-else class="material-upload" drag action="#" :auto-upload="false" :show-file-list="false"
                            :multiple="item.limit > 1"
                            accept="image/*"
                            @dragover.prevent.stop="($event.dataTransfer && ($event.dataTransfer.dropEffect = 'copy'))"
@@ -1976,7 +2063,7 @@ onBeforeUnmount(() => {
                   </div>
                 </el-upload>
                 <div class="thumbs">
-                  <div v-for="(file,index) in materials[item.key]" :key="file.uid || file.name + index" class="thumb">
+                  <div v-for="(file,index) in materials[item.key]" :key="file.uid || file.name + index" class="thumb" :title="file.name">
                     <el-image :src="file.previewUrl" fit="cover"
                               :initial-index="index"
                               preview-teleported
@@ -2124,7 +2211,8 @@ onBeforeUnmount(() => {
       <div v-if="!results.length" class="empty">暂无生成结果</div>
       <div v-else class="gallery">
         <div v-for="(item,index) in results" :key="item.id || index" class="result-card"
-             :class="{ selected: selected.has(index) }">
+             :class="{ selected: selected.has(index), 'is-draggable': !!item.url }"
+             :draggable="!!item.url" @dragstart="startResultDrag($event, item)">
           <div v-if="item.loading && !item.url" class="loading-placeholder">
             <span>{{
                 item.status === 'preparing' ? '正在准备素材...' : item.status === 'generating' ? '正在加载图片...' : '等待生成'
@@ -2134,7 +2222,7 @@ onBeforeUnmount(() => {
             <el-button v-if="item.taskId" size="small" :icon="SwitchButton" @click="stopOne(index)">停止</el-button>
           </div>
           <template v-else-if="item.url">
-            <el-image :src="item.url" fit="cover"
+            <el-image :src="item.url" fit="cover" lazy
                       :class="{ 'is-image-loading': item.imageLoading }"
                       @load="item.imageLoading = false"
                       @error="item.imageLoading = false"

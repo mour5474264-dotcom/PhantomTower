@@ -109,7 +109,13 @@
 .queue .result-card {
   position: relative !important;
   isolation: isolate;
+  content-visibility: auto;
+  contain-intrinsic-size: auto 220px;
 }
+
+.queue .result-card.is-draggable { cursor: grab; }
+.queue .result-card.is-draggable:active { cursor: grabbing; }
+.material-upload .el-upload-dragger.is-dragover { border-color: #238b7f; background: #e8f6f1; }
 
 .result-card .el-image.is-image-loading {
   opacity: .18;
