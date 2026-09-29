@@ -23,7 +23,7 @@ const formRules = computed(() => ({
 
 const isBuiltIn = computed(() => activeTab.value === 'builtin')
 const title = computed(() => isBuiltIn.value ? '内置提示词预设' : '提示词预设')
-const operationLabels = {batch: '逐张批处理', 'three-view': '三视图', 'clothing-replace': '服装替换', edit: '局部继续编辑', fusion: '多图融合', background: '背景替换', prop: '道具替换', all: '全部', text: '文字生图'}
+const operationLabels = {batch: '逐张批处理', 'three-view': '三视图', 'clothing-replace': '服装替换', 'hairstyle-replace': '发型替换', 'makeup-replace': '妆造替换', edit: '局部继续编辑', fusion: '多图融合', background: '背景替换', prop: '道具替换', all: '全部', text: '文字生图'}
 const description = computed(() => isBuiltIn.value
   ? '内置预设会根据创作台当前功能和人物模式自动匹配，不会作为普通预设显示。'
   : '保存可重复使用的创作提示词；创作台的所有模式均可按需选择。')

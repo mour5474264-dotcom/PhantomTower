@@ -52,7 +52,7 @@ const generationControllers = new Map()
 const activeGenerationWorks = new Set()
 const queuedCount = ref(0)
 const preview = ref('')
-const materials = ref({person: [], pose: [], prop: [], scene: [], reference: [], videoReference: [], batchReference: [], editReference: [], clothingPerson: [], clothing: []})
+const materials = ref({person: [], pose: [], prop: [], scene: [], reference: [], videoReference: [], batchReference: [], editReference: [], clothingPerson: [], clothing: [], hairstylePerson: [], hairstyle: [], makeupPerson: [], makeup: []})
 const mode = ref('text')
 const isTextMode = computed(() => mode.value === 'text')
 const imageOperation = ref('batch')
@@ -62,7 +62,7 @@ const videoImporting = ref(false)
 const videoImportProgress = ref(0)
 let videoImportController = null
 const personReplaceVariant = ref('double')
-const visibleImageOperations = ['batch', 'three-view', 'edit', 'clothing-replace']
+const visibleImageOperations = ['batch', 'three-view', 'edit', 'clothing-replace', 'hairstyle-replace', 'makeup-replace']
 const clothingScope = ref('outfit')
 const clothingScopes = {top: '上衣', bottom: '下装', outfit: '整套'}
 const replaceObject = ref('')
@@ -250,6 +250,10 @@ async function getRequestSize(task, requestConfig) {
 const materialLabels = {
   clothingPerson: '人物图',
   clothing: '服装参考图',
+  hairstylePerson: '人物图',
+  hairstyle: '发型参考图',
+  makeupPerson: '人物图',
+  makeup: '妆造参考图',
   person: '人物',
   prop: '道具',
   reference: '目标/构图',
@@ -342,6 +346,10 @@ const configStatusType = computed(() => configLoading.value ? 'info' : 'warning'
 const materialTypes = [
   {key: 'clothingPerson', label: '人物图', step: '必填', required: true, limit: 1},
   {key: 'clothing', label: '服装参考图', step: '必填', required: true, limit: 1},
+  {key: 'hairstylePerson', label: '人物图', step: '必填', required: true, limit: 1},
+  {key: 'hairstyle', label: '发型参考图', step: '必填', required: true, limit: 1},
+  {key: 'makeupPerson', label: '人物图', step: '必填', required: true, limit: 1},
+  {key: 'makeup', label: '妆造参考图', step: '必填', required: true, limit: 1},
   {key: 'person', label: '人物参考', step: '可选', hint: '用于固定人物身份、脸部与服装', limit: 3},
   {
     key: 'reference',
@@ -386,6 +394,8 @@ materialTypes.push({
 const activeMaterialTypes = computed(() => {
   const keys = {
     'clothing-replace': ['clothingPerson', 'clothing'],
+    'hairstyle-replace': ['hairstylePerson', 'hairstyle'],
+    'makeup-replace': ['makeupPerson', 'makeup'],
     batch: ['person', 'reference', 'batchReference', 'pose', 'scene', 'prop'],
     'three-view': ['reference'],
     fusion: ['person', 'reference', 'scene', 'prop'],
@@ -730,7 +740,7 @@ function scheduleHomeMemoryPersist() {
 }
 
 function referenceRole(key) {
-  if (key === 'clothingPerson') return 'target_reference'
+  if (['clothingPerson', 'hairstylePerson', 'makeupPerson'].includes(key)) return 'target_reference'
   if (key === 'reference') return 'target_reference'
   if (key === 'batchReference') return 'visual_reference'
   if (key === 'editReference') return 'edit_reference'
@@ -741,6 +751,10 @@ function referencePromptLabel(key) {
   return ({
     clothingPerson: '待换装人物图',
     clothing: '服装参考图',
+    hairstylePerson: '待改发型人物图',
+    hairstyle: '发型参考图',
+    makeupPerson: '待改妆造人物图',
+    makeup: '妆造参考图',
     person: '人物参考图',
     reference: '目标图/构图图',
     prop: '道具图',
@@ -972,7 +986,7 @@ async function addFiles(key, upload) {
     error.value = `无法读取图片“${file.name}”，请确认文件已下载到本地；HEIC、HEIF 或 TIFF 图片可先导出为 JPG / PNG。${exception?.message ? `（${exception.message}）` : ''}`;
     return;
   }
-  const limit = key === 'person' ? (imageOperation.value === 'batch' ? (personReplaceVariant.value === 'single' ? 1 : 2) : 3) : ['pose', 'batchReference', 'editReference', 'clothingPerson', 'clothing'].includes(key) ? 1 : 30;
+  const limit = key === 'person' ? (imageOperation.value === 'batch' ? (personReplaceVariant.value === 'single' ? 1 : 2) : 3) : ['pose', 'batchReference', 'editReference', 'clothingPerson', 'clothing', 'hairstylePerson', 'hairstyle', 'makeupPerson', 'makeup'].includes(key) ? 1 : 30;
   if (materials.value[key].length >= limit) {
     error.value = `${materialLabels[key]}最多添加 ${limit} 张`;
     return;
@@ -1119,6 +1133,8 @@ function setImageOperation(nextOperation) {
 function operationLabel(operation = imageOperation.value) {
   return ({
     'clothing-replace': '服装替换',
+    'hairstyle-replace': '发型替换',
+    'makeup-replace': '妆造替换',
     batch: '逐张批处理',
     fusion: '多图融合',
     background: '背景替换',
@@ -1133,6 +1149,14 @@ function buildImageTasks() {
     const person = materials.value.clothingPerson[0]
     if (!person || !materials.value.clothing.length) return []
     return [{item: person, type: 'clothing-replace', label: `服装替换 · ${clothingScopes[clothingScope.value]}`, clothingScope: clothingScope.value, materialKeys: ['clothingPerson', 'clothing']}]
+  }
+  if (['hairstyle-replace', 'makeup-replace'].includes(imageOperation.value)) {
+    const personKey = imageOperation.value === 'hairstyle-replace' ? 'hairstylePerson' : 'makeupPerson'
+    const referenceKey = imageOperation.value === 'hairstyle-replace' ? 'hairstyle' : 'makeup'
+    const person = materials.value[personKey][0]
+    if (!person || !materials.value[referenceKey].length) return []
+    const label = imageOperation.value === 'hairstyle-replace' ? '发型替换' : '妆造替换'
+    return [{item: person, type: imageOperation.value, label, materialKeys: [personKey, referenceKey]}]
   }
   const target = materials.value.reference[0]
   if (imageOperation.value === 'batch') {
@@ -1173,6 +1197,14 @@ function imageValidationError() {
     if (materials.value.clothing.length !== 1) return '服装替换需要上传一张服装参考图'
     return ''
   }
+  if (imageOperation.value === 'hairstyle-replace' || imageOperation.value === 'makeup-replace') {
+    const personKey = imageOperation.value === 'hairstyle-replace' ? 'hairstylePerson' : 'makeupPerson'
+    const referenceKey = imageOperation.value === 'hairstyle-replace' ? 'hairstyle' : 'makeup'
+    const label = imageOperation.value === 'hairstyle-replace' ? '发型替换' : '妆造替换'
+    if (materials.value[personKey].length !== 1) return `${label}需要上传一张人物图`
+    if (materials.value[referenceKey].length !== 1) return `${label}需要上传一张${imageOperation.value === 'hairstyle-replace' ? '发型' : '妆造'}参考图`
+    return ''
+  }
   if (!materials.value.reference.length) return `${operationLabel()}需要至少一张上传图片`
   if (imageOperation.value === 'batch' && materials.value.person.length > (personReplaceVariant.value === 'single' ? 1 : 2)) return `${personReplaceVariant.value === 'single' ? '单人' : '双人'}替换最多使用 ${personReplaceVariant.value === 'single' ? 1 : 2} 张人物参考图`
   if (imageOperation.value === 'background' && !materials.value.scene.length) return '背景替换需要一张背景参考图'
@@ -1190,6 +1222,8 @@ function buildMaterialPrompt(labeled, taskType = 'text', taskLabel = '提示词�
     const scopeRule = scope === 'top' ? '只替换上衣，保留原图下装。' : scope === 'bottom' ? '只替换下装，保留原图上衣。' : '替换参考图中可见的上衣、下装或连衣裙；参考图未提供的服装部分保持原样。'
     return `【本次替换范围】${scopeRule}`
   }
+  if (taskType === 'hairstyle-replace') return '【发型替换】仅调整人物发型，参考发型图修改头发长度、造型、卷曲程度、刘海及发色。保持人物身份、面部五官、表情、肤色、姿势、服装和背景不变；发际线自然，发丝与脸部、耳部和肩部衔接合理，光影与原图一致。'
+  if (taskType === 'makeup-replace') return '【妆造替换】仅调整人物面部妆容，参考妆造图修改底妆、眉妆、眼妆、腮红、修容及唇妆。保持人物身份、五官结构、脸型、表情、发型、服装、姿势和背景不变；保留自然皮肤纹理，避免过度磨皮和改变人物辨识度。'
   if (taskType === 'three-view') {
     return [
       '【多图融合角色设定图：只生成一张完整成图】',
@@ -1998,13 +2032,15 @@ onBeforeUnmount(() => {
                   <el-radio-button label="batch">逐张批处理</el-radio-button>
                   <el-radio-button label="three-view">三视图</el-radio-button>
                   <el-radio-button label="clothing-replace">服装替换</el-radio-button>
+                  <el-radio-button label="hairstyle-replace">发型替换</el-radio-button>
+                  <el-radio-button label="makeup-replace">妆造替换</el-radio-button>
                   <!--                  <el-radio-button label="fusion">多图融合</el-radio-button>-->
                   <!--                  <el-radio-button label="background">背景替换</el-radio-button>-->
                   <!--                  <el-radio-button label="prop">道具替换</el-radio-button>-->
                   <el-radio-button label="edit">局部继续编辑</el-radio-button>
                 </el-radio-group>
               </el-form-item>
-              <p v-if="imageOperation !== 'clothing-replace'" class="operation-hint">{{
+              <p v-if="!['clothing-replace', 'hairstyle-replace', 'makeup-replace'].includes(imageOperation)" class="operation-hint">{{
                   imageOperation === 'batch' ? '每张目标图独立生成。可选上传一张画面参考图，并在提示词中说明要统一借用的色调、道具或氛围；动作模仿图优先决定动作，人物参考固定身份。' : imageOperation === 'three-view' ? '多张人物参考融合为一张：左侧全身正面、侧面、背面，右侧头部正面、45度、侧面、后脑及表情特写。自动比例为横向 3:2。' : imageOperation === 'fusion' ? '人物、主目标、背景和道具共同组成一个融合任务。' : imageOperation === 'background' ? '只使用主目标图和背景参考图，保留前景主体。' : imageOperation === 'prop' ? '只使用主目标图和道具参考图，指定画面中要替换的对象。' : '从结果中选择一张样片作为基础图；可选上传一张编辑参考图，并在提示词中说明要借用的道具、材质或色调。'
                 }}</p>
               <el-form-item v-if="imageOperation === 'clothing-replace'" label="替换范围" class="person-variant-control">
