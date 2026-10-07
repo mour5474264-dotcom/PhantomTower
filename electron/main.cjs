@@ -302,7 +302,10 @@ function migrateLegacySecretKey(legacyDir) {
 
 async function waitForServer(expectedDataDir) {
   let lastError
-  for (let attempt = 0; attempt < 50; attempt += 1) {
+  // The packaged server loads sharp and the optional ONNX runtime before it
+  // starts listening. On a first launch this can take several seconds.
+  const deadline = Date.now() + 30_000
+  while (Date.now() < deadline) {
     if (serverExitCode !== null) throw new Error(`本地数据服务已退出，退出码：${serverExitCode}`)
     try {
       const response = await fetch('http://127.0.0.1:4317/api/health')
@@ -316,7 +319,8 @@ async function waitForServer(expectedDataDir) {
       await new Promise((resolve) => setTimeout(resolve, 100))
     }
   }
-  throw lastError || new Error('本地数据服务启动超时')
+  const detail = lastError?.message ? `：${lastError.message}` : ''
+  throw new Error(`本地数据服务启动超时（30 秒内未能连接 127.0.0.1:4317）${detail}`)
 }
 
 const hasLock = app.requestSingleInstanceLock()
