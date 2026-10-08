@@ -5,6 +5,7 @@ import {ElMessage} from 'element-plus'
 import {X, Plus, ImagePlus, PenLine, FileVideo} from 'lucide-vue-next'
 import {normalizeImageFile, droppedFiles, droppedGeneratedImageUrl, setGeneratedImageDrag} from '../utils/image-drop.mjs'
 import {extractVideoReferences} from '../utils/video-reference.mjs'
+import {imageThumbnailUrl, resultImageSource} from '../utils/image-preview.mjs'
 import {
   getSettings,
   getModels,
@@ -149,7 +150,7 @@ function generationErrorSummary(exception, fallback = '生成失败') {
 function imageUrlFromOutput(output) {
   if (!output) return ''
   if (typeof output === 'string') return normalizeImageUrl(output)
-  const direct = output.url || output.sourceUrl || output.image_url?.url || (typeof output.image_url === 'string' ? output.image_url : '')
+  const direct = output.localUrl || output.local_url || output.url || output.sourceUrl || output.image_url?.url || (typeof output.image_url === 'string' ? output.image_url : '')
   if (direct) return normalizeImageUrl(direct)
   const encoded = output.b64_json || output.base64 || output.base64Data || output.inlineData?.data || output.inline_data?.data
   if (!encoded) return ''
@@ -302,7 +303,7 @@ const materialPreviewUrls = computed(() => Object.fromEntries(
 ))
 // Build the viewer list once per results change. Computing this in every
 // result-card template would scan the entire result set for each card.
-const resultPreviewUrls = computed(() => results.value.map((item) => item?.url).filter(Boolean))
+const resultPreviewUrls = computed(() => results.value.map(resultImageSource).filter(Boolean))
 const resultPreviewIndexes = computed(() => {
   const indexes = []
   let nextIndex = 0
@@ -1982,7 +1983,9 @@ watch([
   replaceObject,
   editParent,
   materials,
-  results
+  // Only observe persisted fields. Image load events and transient task objects
+  // must not reserialize all materials and results into IndexedDB.
+  () => results.value.map(resultMemoryItem)
 ], scheduleHomeMemoryPersist, {deep: true})
 onBeforeUnmount(() => {
   videoImportController?.abort()
@@ -2258,10 +2261,10 @@ onBeforeUnmount(() => {
             <el-button v-if="item.taskId" size="small" :icon="SwitchButton" @click="stopOne(index)">停止</el-button>
           </div>
           <template v-else-if="item.url">
-            <el-image :src="item.url" fit="cover" lazy
+            <el-image :src="item.thumbnailFailed ? resultImageSource(item) : imageThumbnailUrl(resultImageSource(item))" fit="cover" lazy decoding="async"
                       :class="{ 'is-image-loading': item.imageLoading }"
                       @load="item.imageLoading = false"
-                      @error="item.imageLoading = false"
+                      @error="item.imageLoading = false; item.thumbnailFailed = true"
                       :initial-index="resultPreviewIndexes[index]"
                       preview-teleported
                       hide-on-click-modal

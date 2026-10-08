@@ -7,6 +7,7 @@ import net from 'node:net'
 import {fileURLToPath} from 'node:url'
 import {createPersonMask, visionStatus, parseDataUrl} from './vision/index.js'
 import {createRequire} from 'node:module'
+import {createThumbnailCache} from './image-thumbnails.js'
 
 const require = createRequire(import.meta.url)
 let sharpRuntime
@@ -50,6 +51,9 @@ const activeGenerations = new Map()
 // await this promise instead of starting a second download.
 const pendingImages = new Map()
 const pendingGeneratedImages = new Map()
+const getImageThumbnail = createThumbnailCache({
+    directory: path.join(dataDir, 'thumbnails'), loadImage: getDownloadImage, sharp
+})
 let recordsWriteQueue = Promise.resolve()
 let generationLogsWriteQueue = Promise.resolve()
 // Development server fallback keeps `npm run server` usable; packaged builds
@@ -1891,6 +1895,9 @@ http.createServer(async (req, res) => {
             const name = decodeURIComponent(req.url.slice('/api/generated/'.length)).replace(/[^a-zA-Z0-9._-]/g, '')
             if (!name || name.includes('..')) return send(res, 400, {error: 'invalid generated file'})
             try {
+                // A new result may be displayed before its atomic disk write finishes.
+                const pending = pendingGeneratedImages.get(generatedUrl(name))
+                if (pending) await pending
                 const file = path.join(generatedDir, name)
                 const buffer = await fs.readFile(file)
                 const type = imageContentType(name)
@@ -1914,6 +1921,15 @@ http.createServer(async (req, res) => {
             const target = params.get('url');
             const filename = (params.get('filename') || 'atelier-image.png').replace(/[^a-zA-Z0-9._-]/g, '_');
             if (!target || !/^https?:/.test(target)) return send(res, 400, {error: 'invalid url'});
+            if (params.get('thumbnail') === '1') {
+                const buffer = await getImageThumbnail(target)
+                res.writeHead(200, {
+                    'Content-Type': 'image/webp',
+                    'Cache-Control': 'private, max-age=31536000, immutable',
+                    'Access-Control-Allow-Origin': 'null'
+                })
+                return res.end(buffer)
+            }
             const image = await getDownloadImage(target);
             res.writeHead(200, {
                 'Content-Type': image.contentType || 'application/octet-stream',
