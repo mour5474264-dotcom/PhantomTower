@@ -53,10 +53,19 @@ const generationControllers = new Map()
 const activeGenerationWorks = new Set()
 const queuedCount = ref(0)
 const preview = ref('')
-const materials = ref({person: [], pose: [], prop: [], scene: [], reference: [], videoReference: [], batchReference: [], editReference: [], clothingPerson: [], clothing: [], hairstylePerson: [], hairstyle: [], makeupPerson: [], makeup: []})
+function createMaterialBuckets() {
+  return {person: [], pose: [], prop: [], scene: [], reference: [], videoReference: [], batchReference: [], editReference: [], clothingPerson: [], clothing: [], hairstylePerson: [], hairstyle: [], makeupPerson: [], makeup: []}
+}
+const materialsByFeature = ref({})
+const materialUploadRoot = ref(null)
 const mode = ref('text')
 const isTextMode = computed(() => mode.value === 'text')
 const imageOperation = ref('batch')
+const currentFeature = computed(() => mode.value === 'text' ? 'text' : imageOperation.value)
+watch(currentFeature, (feature) => {
+  materialsByFeature.value[feature] ??= createMaterialBuckets()
+}, {immediate: true, flush: 'sync'})
+const materials = computed(() => materialsByFeature.value[currentFeature.value])
 const threeViewSource = ref('image')
 const threeViewMaterialKey = computed(() => threeViewSource.value === 'video' ? 'videoReference' : 'reference')
 const videoImporting = ref(false)
@@ -312,6 +321,14 @@ const resultPreviewIndexes = computed(() => {
   })
   return indexes
 })
+
+// Keep the opened viewer independent from cards that are still generating.
+// The shared list used to change as results arrived, which could leave the
+// viewer on a stale index and render a blank/gray image.
+function resultViewerUrls(item) {
+  const url = resultImageSource(item)
+  return url ? [url] : []
+}
 const progressTotal = computed(() => generationTotal.value || totalExpected.value || 0)
 const progressPercent = computed(() => progressTotal.value ? Math.min(100, Math.round(completedCount.value / progressTotal.value * 100)) : 0)
 const imageTaskCount = computed(() => buildImageTasks().length)
@@ -518,6 +535,25 @@ function clearMaterialBucket(key) {
   materials.value[key] = []
 }
 
+function clearCurrentImages() {
+  videoImportController?.abort()
+  const feature = currentFeature.value
+  Object.keys(materials.value).forEach(clearMaterialBucket)
+  materialsByFeature.value[feature] = createMaterialBuckets()
+  for (const input of materialUploadRoot.value?.querySelectorAll('input[type="file"]') || []) {
+    input.value = ''
+  }
+  if (feature === 'edit') editParent.value = null
+}
+
+function clearAllFeatureImages() {
+  clearCurrentImages()
+  for (const buckets of Object.values(materialsByFeature.value)) {
+    for (const items of Object.values(buckets)) items.forEach(revokeMaterialPreview)
+  }
+  materialsByFeature.value = {[currentFeature.value]: createMaterialBuckets()}
+}
+
 function resultMemoryItem(item) {
   const isSourcePreview = Boolean(item.isSourcePreview)
   const imageUrl = item.exportUrl || item.localUrl || item.url || ''
@@ -683,8 +719,10 @@ function makeHomeMemorySnapshot() {
       replaceObject: replaceObject.value,
       editParent: editParentMemoryItem(editParent.value)
     },
-    materials: Object.fromEntries(
-        Object.entries(materials.value).map(([key, items]) => [key, items.map(materialMemoryItem).filter(Boolean)])
+    materialsByFeature: Object.fromEntries(
+        Object.entries(materialsByFeature.value).map(([feature, buckets]) => [feature, Object.fromEntries(
+            Object.entries(buckets).map(([key, items]) => [key, items.map(materialMemoryItem).filter(Boolean)])
+        )])
     ),
     results: results.value.map(resultMemoryItem)
   }
@@ -714,9 +752,15 @@ async function restoreHomeMemory() {
     clothingScope.value = Object.hasOwn(clothingScopes, form.clothingScope) ? form.clothingScope : 'outfit'
     replaceObject.value = form.replaceObject || ''
     editParent.value = form.editParent || null
-    Object.keys(materials.value).forEach((key) => {
-      materials.value[key] = (saved.materials?.[key] || []).map(restoreMaterialItem).filter(Boolean)
-    })
+    // Legacy snapshots kept image inputs even while the text mode was selected.
+    const savedFeatures = saved.materialsByFeature || {[imageOperation.value]: saved.materials || {}}
+    for (const [feature, savedBuckets] of Object.entries(savedFeatures)) {
+      const buckets = createMaterialBuckets()
+      for (const key of Object.keys(buckets)) {
+        buckets[key] = (savedBuckets?.[key] || []).map(restoreMaterialItem).filter(Boolean)
+      }
+      materialsByFeature.value[feature] = buckets
+    }
     results.value = (saved.results || []).map(restoreResultItem)
     selected.value = new Set()
     await restorePersistedResultImages()
@@ -905,6 +949,8 @@ async function prepareEditReferenceFile(file) {
 }
 
 async function dropMaterialFiles(key, event) {
+  const feature = currentFeature.value
+  const buckets = materials.value
   const files = droppedFiles(event.dataTransfer)
   const generatedImageUrl = droppedGeneratedImageUrl(event.dataTransfer)
   if (generatedImageUrl) {
@@ -914,7 +960,7 @@ async function dropMaterialFiles(key, event) {
       const blob = await response.blob()
       if (!blob.type.startsWith('image/')) throw new Error('拖入内容不是图片')
       const extension = blob.type.split('/')[1]?.replace('jpeg', 'jpg') || 'png'
-      await addFiles(key, new File([blob], `sample-${Date.now()}.${extension}`, {type: blob.type}))
+      await addFiles(key, new File([blob], `sample-${Date.now()}.${extension}`, {type: blob.type}), feature, buckets)
       return
     } catch (exception) {
       error.value = `无法读取生成图片，请稍后重试。${exception?.message ? `（${exception.message}）` : ''}`
@@ -925,7 +971,7 @@ async function dropMaterialFiles(key, event) {
     error.value = '未读取到图片文件，请从 Finder 或文件管理器拖入本地图片，或点击上传。'
     return
   }
-  for (const file of files) await addFiles(key, file)
+  for (const file of files) await addFiles(key, file, feature, buckets)
 }
 
 function startResultDrag(event, item) {
@@ -963,7 +1009,8 @@ async function importReferenceVideo(upload) {
 
 watch([mode, imageOperation, threeViewSource], () => videoImportController?.abort(), {flush: 'sync'})
 
-async function addFiles(key, upload) {
+async function addFiles(key, upload, feature = currentFeature.value, buckets = materials.value) {
+  const personLimit = personReplaceVariant.value === 'single' ? 1 : 2
   const file = normalizeImageFile(rawFile(upload));
   if (!file) {
     error.value = '请选择图片文件，不支持文件夹或非图片附件。';
@@ -987,13 +1034,15 @@ async function addFiles(key, upload) {
     error.value = `无法读取图片“${file.name}”，请确认文件已下载到本地；HEIC、HEIF 或 TIFF 图片可先导出为 JPG / PNG。${exception?.message ? `（${exception.message}）` : ''}`;
     return;
   }
-  const limit = key === 'person' ? (imageOperation.value === 'batch' ? (personReplaceVariant.value === 'single' ? 1 : 2) : 3) : ['pose', 'batchReference', 'editReference', 'clothingPerson', 'clothing', 'hairstylePerson', 'hairstyle', 'makeupPerson', 'makeup'].includes(key) ? 1 : 30;
-  if (materials.value[key].length >= limit) {
+  // A cleared bucket must not be repopulated by an earlier asynchronous upload.
+  if (materialsByFeature.value[feature] !== buckets) return
+  const limit = key === 'person' ? (feature === 'batch' ? personLimit : 3) : ['pose', 'batchReference', 'editReference', 'clothingPerson', 'clothing', 'hairstylePerson', 'hairstyle', 'makeupPerson', 'makeup'].includes(key) ? 1 : 30;
+  if (buckets[key].length >= limit) {
     error.value = `${materialLabels[key]}最多添加 ${limit} 张`;
     return;
   }
-  if (materials.value[key].some((item) => item.name === preparedFile.name && item.size === preparedFile.size)) return;
-  materials.value[key].push(markRaw({
+  if (buckets[key].some((item) => item.name === preparedFile.name && item.size === preparedFile.size)) return;
+  buckets[key].push(markRaw({
     file: preparedFile,
     name: preparedFile.name,
     size: preparedFile.size,
@@ -1067,7 +1116,7 @@ async function startNewTask() {
   generationControllers.clear()
   activeGenerationWorks.clear()
   running.value = false
-  Object.keys(materials.value).forEach(clearMaterialBucket)
+  clearAllFeatureImages()
   results.value = [];
   selected.value = new Set();
   prompt.value = '';
@@ -1089,7 +1138,7 @@ async function startNewTask() {
 }
 
 function clearCurrent() {
-  Object.keys(materials.value).forEach(clearMaterialBucket)
+  clearCurrentImages()
   selected.value = new Set();
   prompt.value = '';
   replaceObject.value = '';
@@ -1596,7 +1645,9 @@ async function continueEdit() {
     const sourceFile = new File([blob], `sample-${Date.now()}.${format.value}`, {type: blob.type || 'image/png'})
     const preparedFile = await prepareEditReferenceFile(sourceFile)
 
-    Object.keys(materials.value).forEach(clearMaterialBucket)
+    mode.value = 'image'
+    imageOperation.value = 'edit'
+    clearCurrentImages()
     materials.value.reference = [markRaw({
       file: preparedFile.file,
       name: preparedFile.file.name,
@@ -1605,8 +1656,6 @@ async function continueEdit() {
       height: preparedFile.height,
       previewUrl: URL.createObjectURL(preparedFile.file)
     })]
-    mode.value = 'image'
-    imageOperation.value = 'edit'
     editParent.value = result
     prompt.value = ''
     size.value = '1024x1024'
@@ -1633,7 +1682,9 @@ async function restoreHistoryEdit() {
     const blob = await response.blob()
     const sourceFile = new File([blob], `sample-${Date.now()}.${format.value}`, {type: blob.type || 'image/png'})
     const preparedFile = await prepareEditReferenceFile(sourceFile)
-    Object.keys(materials.value).forEach(clearMaterialBucket)
+    mode.value = 'image'
+    imageOperation.value = 'edit'
+    clearCurrentImages()
     materials.value.reference = [markRaw({
       file: preparedFile.file,
       name: preparedFile.file.name,
@@ -1642,8 +1693,6 @@ async function restoreHistoryEdit() {
       height: preparedFile.height,
       previewUrl: URL.createObjectURL(preparedFile.file)
     })]
-    mode.value = 'image';
-    imageOperation.value = 'edit';
     editParent.value = source;
     size.value = '1024x1024'
     resolution.value = '1K'
@@ -1982,7 +2031,7 @@ watch([
   personReplaceVariant,
   replaceObject,
   editParent,
-  materials,
+  materialsByFeature,
   // Only observe persisted fields. Image load events and transient task objects
   // must not reserialize all materials and results into IndexedDB.
   () => results.value.map(resultMemoryItem)
@@ -1998,9 +2047,9 @@ onBeforeUnmount(() => {
   window.clearTimeout(persistHomeMemoryTimer)
   promptResizeCleanup?.()
   railResizeCleanup?.()
-  Object.keys(materials.value).forEach((key) => {
-    for (const item of materials.value[key] || []) revokeMaterialPreview(item)
-  })
+  for (const buckets of Object.values(materialsByFeature.value)) {
+    for (const items of Object.values(buckets)) items.forEach(revokeMaterialPreview)
+  }
   if (!restoringHomeMemory) writeHomeMemory(makeHomeMemorySnapshot()).catch(() => null)
 })
 </script>
@@ -2028,7 +2077,8 @@ onBeforeUnmount(() => {
                 isTextMode ? '无需上传素材，图像描述将直接发送给生成接口。' : '上传素材并指定角色，提示词仅补充生成意图。'
               }}</p>
             <div v-if="isTextMode" class="text-mode-empty">在下方提示词区域描述画面后即可开始生成。</div>
-            <div v-if="!isTextMode" class="assets">
+            <div v-if="!isTextMode" :key="currentFeature" ref="materialUploadRoot" class="assets">
+              <el-button class="rail-new-task" native-type="button" :icon="Delete" @click="clearCurrentImages">清理图片</el-button>
               <el-form-item label="处理方式" class="image-operation">
                 <el-radio-group class="image-operation-options" :model-value="imageOperation"
                                 @change="setImageOperation">
@@ -2265,10 +2315,9 @@ onBeforeUnmount(() => {
                       :class="{ 'is-image-loading': item.imageLoading }"
                       @load="item.imageLoading = false"
                       @error="item.imageLoading = false; item.thumbnailFailed = true"
-                      :initial-index="resultPreviewIndexes[index]"
                       preview-teleported
                       hide-on-click-modal
-                      :preview-src-list="resultPreviewUrls"/>
+                      :preview-src-list="resultViewerUrls(item)"/>
             <span class="result-label">{{ item.label }} · V{{ item.version || 1 }}<small
                 v-if="item.parentResultId">续作</small></span>
             <el-button v-if="item.task" size="small" :icon="Refresh" @click="retry(index)">再次生成</el-button>
