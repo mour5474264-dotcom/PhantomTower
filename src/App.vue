@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { RouterLink, RouterView } from 'vue-router'
 import { Images, Settings2, Server, History, SlidersHorizontal, ChevronDown } from 'lucide-vue-next'
 import { ElConfigProvider } from 'element-plus'
@@ -54,6 +54,45 @@ const activating = ref(false)
 const isAuthorized = computed(() => licenseStatus.value.state === 'authorized')
 const isLocalDevelopment = import.meta.env.DEV && ['localhost', '127.0.0.1'].includes(window.location.hostname)
 const desktopLicense = window.phantomTowerLicense
+const desktopServer = window.phantomTowerServer
+const localServerStatus = ref(desktopServer?.getStatus
+  ? {state: 'starting', message: '正在检查本地数据服务...', logPath: ''}
+  : {state: 'ready', message: '', logPath: ''})
+const isServerReady = computed(() => localServerStatus.value.state === 'ready')
+const restartingServer = ref(false)
+let removeServerStatusListener
+
+async function restartLocalServer() {
+  if (restartingServer.value) return
+  restartingServer.value = true
+  localServerStatus.value = {...localServerStatus.value, state: 'starting', message: '正在重新启动本地数据服务...'}
+  try {
+    await desktopServer.restart()
+    window.location.reload()
+  } catch (error) {
+    const message = String(error?.message || error || '').replace(/^Error invoking remote method [^:]+:\s*Error:\s*/i, '')
+    localServerStatus.value = {state: 'error', message: message || '本地数据服务重启失败', logPath: localServerStatus.value.logPath}
+  } finally {
+    restartingServer.value = false
+  }
+}
+
+onMounted(async () => {
+  if (!desktopServer?.getStatus) return
+  let statusChanged = false
+  removeServerStatusListener = desktopServer.onStatus((status) => {
+    statusChanged = true
+    localServerStatus.value = status
+  })
+  try {
+    const status = await desktopServer.getStatus()
+    if (!statusChanged) localServerStatus.value = status
+  } catch (error) {
+    if (!statusChanged) localServerStatus.value = {state: 'error', message: error.message || '无法读取本地服务状态', logPath: ''}
+  }
+})
+
+watch(isServerReady, (ready) => { if (ready) refreshApiProfiles() }, {immediate: true})
 function friendlyActivationError(error) {
   const message = String(error?.message || error || '')
   if (message.includes('invalid_or_expired_license')) return '许可证无效或已过期，请检查 PT 许可证是否完整。'
@@ -84,7 +123,7 @@ async function activateLicense() {
   } finally { activating.value = false }
 }
 
-onMounted(() => { refreshLicenseStatus(); refreshApiProfiles() })
+onMounted(() => refreshLicenseStatus())
 let licenseCheckTimer
 onMounted(() => {
   if (isLocalDevelopment || !desktopLicense?.getStatus) return
@@ -103,12 +142,22 @@ onMounted(() => window.addEventListener('sample-factory-settings-changed', refre
 onUnmounted(() => {
   window.clearInterval(licenseCheckTimer)
   window.removeEventListener('sample-factory-settings-changed', refreshApiProfiles)
+  removeServerStatusListener?.()
 })
 </script>
 
 <template>
   <el-config-provider :locale="locale">
-  <section v-if="!isAuthorized" class="license-gate">
+  <section v-if="!isServerReady" class="server-gate" aria-live="polite">
+    <div class="server-panel">
+      <div class="brand"><span class="mark">S</span><div><b>样片工厂</b><small>Sample Factory</small></div></div>
+      <h1>{{ localServerStatus.state === 'error' ? '本地数据服务启动失败' : '正在启动本地数据服务' }}</h1>
+      <p class="server-message">{{ localServerStatus.message }}</p>
+      <button v-if="localServerStatus.state === 'error'" type="button" :disabled="restartingServer" @click="restartLocalServer">重新启动本地服务</button>
+      <p v-if="localServerStatus.logPath && localServerStatus.state === 'error'" class="server-log">服务日志：<code>{{ localServerStatus.logPath }}</code></p>
+    </div>
+  </section>
+  <section v-if="isServerReady && !isAuthorized" class="license-gate">
     <div class="license-panel">
       <div class="brand"><span class="mark">S</span><div><b>样片工厂</b><small>Sample Factory</small></div></div>
       <h1>激活授权</h1>
@@ -121,7 +170,7 @@ onUnmounted(() => {
       </form>
     </div>
   </section>
-  <header v-if="isAuthorized" class="sidebar" aria-label="主导航">
+  <header v-if="isServerReady && isAuthorized" class="sidebar" aria-label="主导航">
     <div class="brand"><span class="mark">S</span><div><b>样片工厂</b><small>Sample Factory</small></div></div>
     <nav aria-label="功能导航">
       <RouterLink to="/"><Images :size="17" />创作工作台</RouterLink>
@@ -145,7 +194,7 @@ onUnmounted(() => {
       </div>
     </div>
   </header>
-  <main v-if="isAuthorized">
+  <main v-if="isServerReady && isAuthorized">
     <RouterView v-slot="{ Component }">
       <KeepAlive>
         <component :is="Component" />
@@ -156,6 +205,15 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+.server-gate { position: fixed; inset: 0; z-index: 11; display: grid; place-items: center; padding: 24px; background: #f1eee7; }
+.server-panel { box-sizing: border-box; width: min(100%, 460px); padding: 32px; border: 1px solid #d5cec1; background: #fffdf8; box-shadow: 0 18px 48px rgb(42 37 29 / 14%); }
+.server-panel h1 { margin: 32px 0 8px; font-size: 24px; color: #27241f; }
+.server-panel p { color: #696154; line-height: 1.6; }
+.server-panel .server-message { overflow-wrap: anywhere; }
+.server-panel button { min-height: 42px; margin-top: 14px; padding: 0 18px; border: 0; background: #27241f; color: #fff; font: inherit; cursor: pointer; }
+.server-panel button:disabled { cursor: wait; opacity: .6; }
+.server-panel .server-log { margin-top: 24px; font-size: 12px; }
+.server-panel code { overflow-wrap: anywhere; }
 .license-gate { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; padding: 24px; background: #f1eee7; }
 .license-panel { width: min(100%, 420px); padding: 32px; border: 1px solid #d5cec1; background: #fffdf8; box-shadow: 0 18px 48px rgb(42 37 29 / 14%); }
 .license-panel h1 { margin: 32px 0 8px; font-size: 24px; }

@@ -36,6 +36,7 @@ async function setPageSize(value) {
 const recordItems = computed(() => records.value.flatMap((record) => (
   images(record).map((url, index) => ({record, url, index}))
 )))
+const previewIndex = ref(-1)
 
 function hasRecordInfo(record) {
   return Boolean(record?.model || record?.upstreamName || record?.prompt || record?.request?.effectivePrompt)
@@ -189,10 +190,29 @@ async function changePage(value) {
 
 function closePreview() {
   preview.value = null
+  previewIndex.value = -1
+}
+
+function openPreview(index) {
+  if (!recordItems.value[index]) return
+  previewIndex.value = index
+  preview.value = recordItems.value[index].url
+}
+
+function movePreview(offset) {
+  if (!preview.value || !recordItems.value.length) return
+  const next = Math.min(recordItems.value.length - 1, Math.max(0, previewIndex.value + offset))
+  if (next === previewIndex.value) return
+  previewIndex.value = next
+  preview.value = recordItems.value[next].url
 }
 
 function onPreviewKeydown(event) {
   if (event.key === 'Escape' && preview.value) closePreview()
+  if (preview.value && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) {
+    event.preventDefault()
+    movePreview(event.key === 'ArrowRight' ? 1 : -1)
+  }
   if (event.key === 'Escape' && selectedRecord.value) closeRecordInfo()
 }
 
@@ -248,12 +268,12 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onPreviewKeydown))
       <div v-if="!records.length" class="empty">暂无生成记录</div>
       <div v-else-if="!recordItems.length" class="empty">记录中暂无可展示的图片</div>
       <div v-else class="history-grid" :style="{'--history-columns': gridColumns}">
-        <article v-for="item in recordItems" :key="`${item.record.id}-${item.index}`" class="record-card">
+        <article v-for="(item, previewItemIndex) in recordItems" :key="`${item.record.id}-${item.index}`" class="record-card">
           <div class="record-card-head">
             <div class="record-time">{{ formatRecordTime(item.record.createdAt) }}</div>
             <span v-if="item.record.request?.builtinVariant" class="record-variant">{{ item.record.request.builtinVariant === 'single' ? '单人替换' : '双人替换' }}</span>
           </div>
-          <button class="record-preview" title="预览图片" :aria-label="`预览第 ${item.index + 1} 张图片`" @click="preview=item.url">
+          <button class="record-preview" title="预览图片" :aria-label="`预览第 ${item.index + 1} 张图片`" @click="openPreview(previewItemIndex)">
             <img :src="item.url" loading="lazy" decoding="async" :alt="`生成记录 ${formatRecordTime(item.record.createdAt)}，第 ${item.index + 1} 张图片`"/>
             <span class="record-preview-icon"><Maximize2 :size="15"/></span>
           </button>
@@ -274,7 +294,11 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onPreviewKeydown))
        <button class="preview-close" aria-label="关闭图片预览" @click="closePreview">
          <X/>
        </button>
-      <img :src="preview" alt="记录图片预览"/></div>
+       <button type="button" class="preview-nav preview-prev" aria-label="上一张图片" title="上一张（←）" :disabled="previewIndex <= 0" @click="movePreview(-1)">‹</button>
+       <img :src="preview" alt="记录图片预览"/>
+       <button type="button" class="preview-nav preview-next" aria-label="下一张图片" title="下一张（→）" :disabled="previewIndex >= recordItems.length - 1" @click="movePreview(1)">›</button>
+       <span class="preview-counter">{{ previewIndex + 1 }} / {{ recordItems.length }} · ← → 切换，Esc 关闭</span>
+     </div>
     <div v-if="selectedRecord" class="record-info-modal" role="dialog" aria-modal="true" aria-label="生成信息" @click.self="closeRecordInfo">
       <article class="record-info-dialog">
         <button class="record-info-close" aria-label="关闭生成信息" @click="closeRecordInfo"><X :size="18"/></button>

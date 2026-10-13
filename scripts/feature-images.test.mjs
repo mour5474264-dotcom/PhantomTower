@@ -3,6 +3,7 @@ import {readFileSync} from 'node:fs'
 import vm from 'node:vm'
 import test from 'node:test'
 import {ref, computed, watch, markRaw} from 'vue'
+import {createImageSignature} from '../src/utils/background-match.mjs'
 
 const source = readFileSync(new URL('../src/views/Workspace.vue', import.meta.url), 'utf8')
 
@@ -23,7 +24,7 @@ function setup() {
     editParent: ref(null),
     globalThis: {URL: {revokeObjectURL: url => revoked.push(url)}},
     URL: {createObjectURL: file => `blob:${file.name}`},
-    normalizeImageFile: file => file, rawFile: file => file,
+    normalizeImageFile: file => file, rawFile: file => file, createImageSignature,
     personReplaceVariant: ref('double'), MAX_REFERENCE_IMAGE_SIDE: 4096,
     error: ref(''), materialLabels: {reference: 'Reference'}, showMessage() {},
     imageDimensions: async () => ({width: 100, height: 100})

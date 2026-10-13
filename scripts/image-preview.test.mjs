@@ -64,7 +64,7 @@ test('image load and thumbnail fallback do not save the entire workspace; real r
   const source = (await fs.readFile(new URL('../src/views/Workspace.vue', import.meta.url), 'utf8')).replace(/\r\n/g, '\n')
   const memory = source.slice(source.indexOf('function resultMemoryItem('), source.indexOf('function editParentMemoryItem('))
   const watcher = source.slice(source.indexOf('watch([\n  model,'), source.indexOf('onBeforeUnmount(() => {', source.indexOf('watch([\n  model,')))
-  const names = ['model', 'presetId', 'prompt', 'count', 'resolution', 'aspectRatio', 'format', 'size', 'customWidth', 'customHeight', 'mode', 'imageOperation', 'threeViewSource', 'clothingScope', 'personReplaceVariant', 'replaceObject', 'editParent', 'materials']
+  const names = ['model', 'presetId', 'prompt', 'count', 'resolution', 'aspectRatio', 'format', 'size', 'customWidth', 'customHeight', 'mode', 'imageOperation', 'threeViewSource', 'clothingScope', 'personReplaceVariant', 'replaceObject', 'editParent', 'materialsByFeature']
   const results = ref([{id: 'a', url: 'http://127.0.0.1:4317/api/generated/a.png', label: '样片', imageLoading: true, task: {status: 'done'}}])
   let saves = 0
   const stop = vm.runInNewContext(`${memory}\n${watcher}`, {

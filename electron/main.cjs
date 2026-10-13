@@ -4,14 +4,21 @@ const fs = require('node:fs')
 const path = require('node:path')
 const crypto = require('node:crypto')
 const licenseConfig = require('./license-config.cjs')
-let serverProcess
-let serverExitCode = null
+const { createLocalServerManager } = require('./local-server.cjs')
+let localServer
+let serverStatus = { state: 'starting', message: '正在启动本地数据服务...', logPath: '' }
+let serverLogPath = ''
 let mainWindow = null
 let macUpdateUrl = null
 let serverToken = ''
 
 function sendUpdate(type, data) {
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(`update:${type}`, data)
+}
+
+function updateServerStatus(status) {
+  serverStatus = status
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('server:status', status)
 }
 
 function compareVersions(a, b) {
@@ -186,6 +193,8 @@ async function getLicenseStatus() {
 
 ipcMain.handle('license:get-status', () => getLicenseStatus())
 ipcMain.handle('server:get-token', () => serverToken)
+ipcMain.handle('server:get-status', () => serverStatus)
+ipcMain.handle('server:restart', () => startLocalServer())
 ipcMain.handle('license:activate', async (_event, licenseKey) => {
   try { return await activateLicense(licenseKey) }
   catch (error) { throw new Error(friendlyLicenseError(error)) }
@@ -300,27 +309,48 @@ function migrateLegacySecretKey(legacyDir) {
   }
 }
 
-async function waitForServer(expectedDataDir) {
-  let lastError
-  // The packaged server loads sharp and the optional ONNX runtime before it
-  // starts listening. On a first launch this can take several seconds.
-  const deadline = Date.now() + 30_000
-  while (Date.now() < deadline) {
-    if (serverExitCode !== null) throw new Error(`本地数据服务已退出，退出码：${serverExitCode}`)
-    try {
-      const response = await fetch('http://127.0.0.1:4317/api/health')
-      const health = await response.json()
-      if (!response.ok || !health.ok) throw new Error('本地数据服务状态异常')
-      if (path.resolve(health.dataDir) !== path.resolve(expectedDataDir)) throw new Error('端口 4317 已被另一个 PhantomTower 服务占用，请先关闭旧版本或开发服务')
-      return
-    } catch (error) {
-      lastError = error
-      if (error.message.includes('端口 4317')) throw error
-      await new Promise((resolve) => setTimeout(resolve, 100))
-    }
+function prepareLocalServer() {
+  if (localServer) return localServer
+  const serverEntry = app.isPackaged
+    ? path.join(process.resourcesPath, 'server', 'index.js')
+    : path.join(__dirname, '..', 'server', 'index.js')
+  const serverCwd = app.isPackaged ? path.dirname(serverEntry) : path.join(__dirname, '..')
+  const installDir = app.isPackaged ? path.dirname(process.execPath) : path.join(__dirname, '..')
+  // Keep runtime data outside the installation so updates preserve user data.
+  const dataDir = path.join(app.getPath('userData'), 'data')
+  serverLogPath = path.join(dataDir, 'server.log')
+  migrateLegacySecretKey(path.join(installDir, 'data'))
+  migrateLegacyData(path.join(installDir, 'data'), dataDir)
+  const exportDir = path.join(dataDir, 'export')
+  if (app.isPackaged) {
+    syncBundledPresets(dataDir)
+    syncBundledPromptTemplates(dataDir)
   }
-  const detail = lastError?.message ? `：${lastError.message}` : ''
-  throw new Error(`本地数据服务启动超时（30 秒内未能连接 127.0.0.1:4317）${detail}`)
+  fs.mkdirSync(dataDir, { recursive: true })
+  fs.mkdirSync(exportDir, { recursive: true })
+  const serverEnv = { ...process.env, PHANTOMTOWER_DATA_DIR: dataDir, PHANTOMTOWER_EXPORT_DIR: exportDir }
+  if (!serverToken) serverToken = crypto.randomBytes(32).toString('hex')
+  serverEnv.PHANTOMTOWER_SERVER_TOKEN = serverToken
+  serverEnv.PHANTOMTOWER_VISION_MODELS_DIR = app.isPackaged
+    ? path.join(process.resourcesPath, 'vision-models')
+    : path.join(__dirname, '..', 'vision-models')
+  serverEnv.PHANTOMTOWER_SECRET_KEY = loadServerSecretKey()
+  const log = fs.createWriteStream(serverLogPath, { flags: 'a' })
+  log.on('error', (error) => console.error(`本地数据服务日志写入失败：${error.message}`))
+  localServer = createLocalServerManager({
+    fork: (...args) => utilityProcess.fork(...args),
+    entry: serverEntry, cwd: serverCwd, env: serverEnv, dataDir,
+    log, logPath: serverLogPath, onStatus: updateServerStatus
+  })
+  return localServer
+}
+
+async function startLocalServer() {
+  try { return await prepareLocalServer().restart() }
+  catch (error) {
+    updateServerStatus({ state: 'error', message: error.message || String(error), logPath: serverLogPath })
+    throw error
+  }
 }
 
 const hasLock = app.requestSingleInstanceLock()
@@ -331,52 +361,11 @@ else app.on('second-instance', () => {
 })
 
 app.whenReady().then(async () => {
-  const serverEntry = app.isPackaged
-    ? path.join(process.resourcesPath, 'server', 'index.js')
-    : path.join(__dirname, '..', 'server', 'index.js')
-  const serverCwd = app.isPackaged ? path.dirname(serverEntry) : path.join(__dirname, '..')
-  const installDir = app.isPackaged ? path.dirname(process.execPath) : path.join(__dirname, '..')
-  // Keep runtime data outside the install bundle/directory so updates never
-  // remove API settings, presets, history, or generated files.
-  const dataDir = path.join(app.getPath('userData'), 'data')
-  migrateLegacySecretKey(path.join(installDir, 'data'))
-  migrateLegacyData(path.join(installDir, 'data'), dataDir)
-  // Keep the default export location in the application's data directory.
-  let exportDir = path.join(dataDir, 'export')
-  if (app.isPackaged) {
-    syncBundledPresets(dataDir)
-    syncBundledPromptTemplates(dataDir)
-  }
-  fs.mkdirSync(dataDir, { recursive: true })
-  fs.mkdirSync(exportDir, { recursive: true })
-  const serverEnv = { ...process.env, PHANTOMTOWER_DATA_DIR: dataDir, PHANTOMTOWER_EXPORT_DIR: exportDir }
-  serverToken = crypto.randomBytes(32).toString('hex')
-  serverEnv.PHANTOMTOWER_SERVER_TOKEN = serverToken
-  serverEnv.PHANTOMTOWER_VISION_MODELS_DIR = app.isPackaged
-    ? path.join(process.resourcesPath, 'vision-models')
-    : path.join(__dirname, '..', 'vision-models')
-  serverEnv.PHANTOMTOWER_SECRET_KEY = loadServerSecretKey()
-  const logPath = path.join(dataDir, 'server.log')
-  const log = fs.createWriteStream(logPath, { flags: 'a' })
-  serverExitCode = null
-  serverProcess = utilityProcess.fork(serverEntry, [], {
-    cwd: serverCwd,
-    env: serverEnv,
-    stdio: ['ignore', 'pipe', 'pipe'],
-    serviceName: 'PhantomTower Local Server'
-  })
-  serverProcess.stdout.pipe(log, { end: false })
-  serverProcess.stderr.pipe(log, { end: false })
-  serverProcess.on('exit', (code) => { serverExitCode = code })
-  try {
-    await waitForServer(dataDir)
-    createWindow()
-    setupAutoUpdate()
-    app.on('activate', () => { if (!BrowserWindow.getAllWindows().length) createWindow() })
-  } catch (error) {
-    dialog.showErrorBox('PhantomTower 启动失败', `${error.message}\n\n日志：${logPath}`)
-    app.quit()
-  }
+  try { await startLocalServer() }
+  catch (error) { console.error(`本地数据服务启动失败：${error.message}`) }
+  createWindow()
+  setupAutoUpdate()
+  app.on('activate', () => { if (!BrowserWindow.getAllWindows().length) createWindow() })
 })
-app.on('window-all-closed', () => { if (serverProcess) serverProcess.kill(); if (process.platform !== 'darwin') app.quit() })
-app.on('before-quit', () => { if (serverProcess) serverProcess.kill() })
+app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit() })
+app.on('before-quit', () => localServer?.dispose())

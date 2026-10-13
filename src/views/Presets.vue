@@ -8,7 +8,7 @@ const activeTab = ref('user')
 const templates = ref([])
 const dialog = ref(false)
 const editingId = ref('')
-const form = ref({name: '', systemPrompt: '', defaultNegativePrompt: '', variant: ''})
+const form = ref({name: '', systemPrompt: '', defaultNegativePrompt: '', variant: '', material: ''})
 const formRef = ref()
 const requiredRule = (message) => ({
   required: true,
@@ -24,8 +24,9 @@ const formRules = computed(() => ({
 const isBuiltIn = computed(() => activeTab.value === 'builtin')
 const title = computed(() => isBuiltIn.value ? '内置提示词预设' : '提示词预设')
 const operationLabels = {batch: '逐张批处理', 'three-view': '三视图', 'clothing-replace': '服装替换', 'hairstyle-replace': '发型替换', 'makeup-replace': '妆造替换', edit: '局部继续编辑', fusion: '多图融合', background: '背景替换', prop: '道具替换', all: '全部', text: '文字生图'}
+const materialLabels = {prop: '道具参考', scene: '背景参考', pose: '动作模仿', visual: '画面参考图'}
 const description = computed(() => isBuiltIn.value
-  ? '内置预设会根据创作台当前功能和人物模式自动匹配，不会作为普通预设显示。'
+  ? '内置预设会根据创作台当前功能、人物模式和素材子项自动匹配。批处理的道具参考、背景参考、动作模仿、画面参考图规则可在此直接修改。'
   : '保存可重复使用的创作提示词；创作台的所有模式均可按需选择。')
 
 async function loadTemplates() {
@@ -43,19 +44,19 @@ function changeTab(tab) {
 
 function openCreate() {
   editingId.value = ''
-  form.value = {name: '', systemPrompt: '', defaultNegativePrompt: '', variant: ''}
+  form.value = {name: '', systemPrompt: '', defaultNegativePrompt: '', variant: '', material: ''}
   dialog.value = true
 }
 
 function edit(item) {
   editingId.value = item.id
-  form.value = {name: item.name, systemPrompt: item.systemPrompt, defaultNegativePrompt: item.defaultNegativePrompt || '', variant: item.variant || ''}
+  form.value = {name: item.name, systemPrompt: item.systemPrompt, defaultNegativePrompt: item.defaultNegativePrompt || '', variant: item.variant || '', material: item.material || ''}
   dialog.value = true
 }
 
 function copyTemplate(item) {
   editingId.value = ''
-  form.value = {name: `${item.name} 副本`, systemPrompt: item.systemPrompt, defaultNegativePrompt: item.defaultNegativePrompt || '', variant: item.variant || ''}
+  form.value = {name: `${item.name} 副本`, systemPrompt: item.systemPrompt, defaultNegativePrompt: item.defaultNegativePrompt || '', variant: item.variant || '', material: item.material || ''}
   dialog.value = true
 }
 
@@ -65,13 +66,13 @@ async function save() {
   const next = templates.value.map((item) => ({...item}))
   const existingTemplate = next.find((item) => item.id === editingId.value)
   const template = isBuiltIn.value
-    ? {...form.value, mode: existingTemplate?.mode || 'image', operation: existingTemplate?.operation || 'batch', variant: form.value.variant || ''}
+    ? {...form.value, mode: existingTemplate?.mode || 'image', operation: existingTemplate?.operation || 'batch', variant: form.value.material ? '' : form.value.variant || '', material: form.value.material || ''}
     : {...form.value, mode: 'all', operation: 'all'}
   if (editingId.value) Object.assign(existingTemplate, template)
   else next.push({id: crypto.randomUUID(), ...template})
   try {
     templates.value = isBuiltIn.value ? await saveBuiltInPromptTemplates(next) : await savePromptTemplates(next)
-    if (!isBuiltIn.value) notifyPromptTemplatesChanged()
+    notifyPromptTemplatesChanged()
     dialog.value = false
     ElMessage.success('预设已保存')
   } catch (error) { ElMessage.error(formatApiError(error, '预设保存失败')) }
@@ -82,7 +83,7 @@ async function remove(id) {
     await ElMessageBox.confirm('删除后将无法在创作台使用该预设。', '确认删除', {type: 'warning'})
     const next = templates.value.filter((item) => item.id !== id)
     templates.value = isBuiltIn.value ? await saveBuiltInPromptTemplates(next) : await savePromptTemplates(next)
-    if (!isBuiltIn.value) notifyPromptTemplatesChanged()
+    notifyPromptTemplatesChanged()
     ElMessage.success('预设已删除')
   } catch (error) { if (error !== 'cancel' && error !== 'close') ElMessage.error(formatApiError(error, '预设删除失败')) }
 }
@@ -92,6 +93,7 @@ async function restoreDefaults() {
   try {
     await ElMessageBox.confirm('恢复出厂预设会覆盖当前所有内置提示词预设。', '恢复默认设置', {type: 'warning'})
     templates.value = await restoreDefaultBuiltInPromptTemplates()
+    notifyPromptTemplatesChanged()
     ElMessage.success('已恢复内置提示词预设')
   } catch (error) { if (error !== 'cancel' && error !== 'close') ElMessage.error(formatApiError(error, '预设恢复失败')) }
 }
@@ -131,6 +133,9 @@ onMounted(async () => {
         <el-table-column v-if="isBuiltIn" label="人物模式" width="120">
           <template #default="{ row }">{{ row.variant === 'single' ? '单人替换' : row.variant === 'double' ? '双人替换' : '通用' }}</template>
         </el-table-column>
+        <el-table-column v-if="isBuiltIn" label="素材子项" width="120">
+          <template #default="{ row }">{{ materialLabels[row.material] || '—' }}</template>
+        </el-table-column>
         <el-table-column prop="systemPrompt" label="提示词内容" min-width="330" show-overflow-tooltip/>
         <el-table-column label="操作" width="190" fixed="right">
           <template #default="{ row }">
@@ -147,10 +152,19 @@ onMounted(async () => {
         <el-form-item label="预设名称" prop="name" required><el-input v-model="form.name"/></el-form-item>
         <el-form-item :label="isBuiltIn ? '内置提示词' : '提示词内容'" prop="systemPrompt" required><el-input v-model="form.systemPrompt" type="textarea" :rows="6"/></el-form-item>
         <el-form-item v-if="isBuiltIn" label="人物模式">
-          <el-select v-model="form.variant" placeholder="选择适用模式" clearable>
+          <el-select v-model="form.variant" :disabled="!!form.material" placeholder="选择适用模式" clearable>
             <el-option label="通用" value="" />
             <el-option label="单人替换" value="single" />
             <el-option label="双人替换" value="double" />
+          </el-select>
+        </el-form-item>
+        <el-form-item v-if="isBuiltIn" label="素材子项">
+          <el-select v-model="form.material" placeholder="选择素材子项" clearable>
+            <el-option label="通用（整个功能）" value="" />
+            <el-option label="道具参考" value="prop" />
+            <el-option label="背景参考" value="scene" />
+            <el-option label="动作模仿" value="pose" />
+            <el-option label="画面参考图" value="visual" />
           </el-select>
         </el-form-item>
         <el-form-item label="默认负向提示词（可选）"><el-input v-model="form.defaultNegativePrompt" type="textarea" :rows="3"/></el-form-item>

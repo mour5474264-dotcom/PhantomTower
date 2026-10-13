@@ -29,6 +29,43 @@ function sharp() {
     return sharpRuntime
 }
 
+// 入库上限：压缩后的单张图片不得超过它。
+// 上传上限：允许进来的原始体积（4K 生成图常在 20-26MB，需要先收下来再压）。
+const ASSET_COMPRESS_TARGET_BYTES = 18 * 1024 * 1024
+const MAX_ASSET_UPLOAD_BYTES = 64 * 1024 * 1024
+
+// 把过大的图片压到目标体积以内：先降质量，仍超就再降尺寸。
+// 有透明通道的图保留 PNG（先用调色板压缩），避免把透明背景压成黑底。
+async function compressAssetBuffer(buffer, targetBytes = ASSET_COMPRESS_TARGET_BYTES) {
+    const sharpLib = sharp()
+    const meta = await sharpLib(buffer, {failOn: 'none'}).metadata()
+    const width = Number(meta.width) || 0
+    const hasAlpha = Boolean(meta.hasAlpha)
+    const encode = async (quality, scale) => {
+        let pipe = sharpLib(buffer, {failOn: 'none'})
+        if (scale < 1 && width > 0) {
+            pipe = pipe.resize({width: Math.max(1, Math.round(width * scale)), withoutEnlargement: true})
+        }
+        if (hasAlpha) {
+            return pipe.png({compressionLevel: 9, effort: 4, palette: true, quality}).toBuffer()
+        }
+        return pipe.jpeg({quality, chromaSubsampling: '4:4:4', mozjpeg: true}).toBuffer()
+    }
+    for (const quality of [98, 97, 96, 95, 93, 90, 87, 84, 80, 75, 70]) {
+        const out = await encode(quality, 1)
+        if (out.length <= targetBytes) return {buffer: out, quality, scale: 1, resized: false}
+    }
+    for (const scale of [0.9, 0.8, 0.7, 0.6, 0.5, 0.4]) {
+        for (const quality of [95, 90, 85, 80, 72]) {
+            const out = await encode(quality, scale)
+            if (out.length <= targetBytes) return {buffer: out, quality, scale, resized: true}
+        }
+    }
+    const out = await encode(70, 0.4)
+    return {buffer: out, quality: 70, scale: 0.4, resized: true}
+}
+
+
 const dataDir = process.env.PHANTOMTOWER_DATA_DIR || path.join(path.dirname(fileURLToPath(import.meta.url)), '../data')
 const generatedDir = path.join(dataDir, 'generated')
 const assetsDir = path.join(dataDir, 'assets')
@@ -244,13 +281,18 @@ function normalizePromptTemplate(template, previous = {}) {
     const hasVariant = template && Object.prototype.hasOwnProperty.call(template, 'variant')
     const inferredVariant = hasVariant ? template.variant : (previous?.variant || (String(template?.id || previous?.id || '') === 'person-replace' ? 'double' : ''))
     const previousVariant = previous?.variant || (previous?.id === 'person-replace' ? 'double' : '')
-    const contentChanged = ['name', 'mode', 'operation', 'systemPrompt', 'defaultNegativePrompt'].some((key) => String(template?.[key] || '') !== String(previous?.[key] || '')) || String(inferredVariant || '') !== String(previousVariant || '')
+    const hasMaterial = template && Object.prototype.hasOwnProperty.call(template, 'material')
+    const inferredMaterial = hasMaterial ? template.material : (previous?.material || '')
+    const previousMaterial = previous?.material || ''
+    const contentChanged = ['name', 'mode', 'operation', 'systemPrompt', 'defaultNegativePrompt'].some((key) => String(template?.[key] || '') !== String(previous?.[key] || '')) || String(inferredVariant || '') !== String(previousVariant || '') || String(inferredMaterial || '') !== String(previousMaterial || '')
     return {
         id: String(template?.id || previous.id || crypto.randomUUID()),
         name: String(template?.name || '').trim(),
         mode: ['text', 'image', 'all'].includes(template?.mode) ? template.mode : (previous.mode || 'all'),
         operation: ['all', 'text', 'batch', 'three-view', 'fusion', 'background', 'prop', 'edit', 'clothing-replace', 'hairstyle-replace', 'makeup-replace'].includes(template?.operation) ? template.operation : (previous.operation || 'all'),
         variant: ['single', 'double'].includes(inferredVariant) ? inferredVariant : '',
+        // 逐张批处理 的素材子项规则（道具参考、背景参考、动作模仿、画面参考图）。
+        material: ['prop', 'scene', 'pose', 'visual'].includes(inferredMaterial) ? inferredMaterial : '',
         systemPrompt: String(template?.systemPrompt || ''),
         defaultNegativePrompt: String(template?.defaultNegativePrompt || ''),
         updatedAt: contentChanged || !previous.id ? now : previous.updatedAt,
@@ -264,7 +306,9 @@ function promptTemplateMatches(template, mode, operation, variant = '') {
         reference: 'batch',
         'prop-replace': 'prop'
     })[operation] || operation
-    return template && (template.mode === 'all' || template.mode === mode)
+    // Material sub-rules refine one reference input; they are never the single
+    // rule that describes the whole operation.
+    return template && !template.material && (template.mode === 'all' || template.mode === mode)
         && (!template.operation || template.operation === 'all' || template.operation === normalizedOperation)
         && (!variant || !template.variant || template.variant === variant)
 }
@@ -280,7 +324,7 @@ async function savePromptTemplates(value, targetFile = files.promptTemplates) {
     if (targetFile === files.builtInPromptTemplates) {
         const keys = new Set()
         for (const item of templates) {
-            const key = `${item.mode}|${item.operation}|${item.variant || 'all'}`
+            const key = `${item.mode}|${item.operation}|${item.variant || 'all'}|${item.material || 'main'}`
             if (keys.has(key)) throw new Error(`内置提示词模式重复：${item.name}`)
             keys.add(key)
         }
@@ -297,11 +341,11 @@ async function savePromptTemplates(value, targetFile = files.promptTemplates) {
     return templates
 }
 
-function send(res, status, data) {
+function send(res, status, data, extraHeaders = {}) {
     if (res.destroyed) return;
     const origin = res.req?.headers?.origin
     const allowedOrigin = !origin || origin === 'null' || /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin) ? (origin || 'null') : 'null'
-    res.writeHead(status, {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': allowedOrigin, 'Vary': 'Origin'});
+    res.writeHead(status, {'Content-Type': 'application/json', 'Access-Control-Allow-Origin': allowedOrigin, 'Vary': 'Origin', ...extraHeaders});
     res.end(JSON.stringify(data))
 }
 
@@ -610,7 +654,7 @@ async function requestBuffer(req, maxBytes) {
     return Buffer.concat(chunks)
 }
 
-async function multipartForm(req, maxBytes = MAX_ASSET_BYTES + 1024 * 1024) {
+async function multipartForm(req, maxBytes = MAX_ASSET_UPLOAD_BYTES + 1024 * 1024) {
     const contentType = String(req.headers['content-type'] || '')
     if (!/^multipart\/form-data\s*;/i.test(contentType)) {
         const error = new Error('请求必须使用 multipart/form-data')
@@ -1078,6 +1122,12 @@ function promptTemplateOperation(operation, mode) {
         'local-edit': 'edit'
     }
     return aliases[operation] || operation || (mode === 'text' ? 'text' : 'all')
+}
+
+function imageEditMask(operation, materials, mask) {
+    if (operation === 'background') return ''
+    if (operation === 'batch' && Array.isArray(materials) && materials.some((item) => item?.role === 'scene_reference')) return ''
+    return mask || ''
 }
 
 async function activeApi() {
@@ -1654,7 +1704,7 @@ http.createServer(async (req, res) => {
     }
     try {
         if (requiresServerAuth(req) && !authorized(req)) return send(res, 401, {error: '本地服务认证失败', code: 'LOCAL_AUTH_REQUIRED'})
-        if (req.url === '/api/health' && req.method === 'GET') return send(res, 200, {ok: true, dataDir, exportDir})
+        if (req.url === '/api/health' && req.method === 'GET') return send(res, 200, {ok: true, dataDir, exportDir, instanceId: process.env.PHANTOMTOWER_SERVER_INSTANCE || ''})
         if (req.url === '/api/vision/status' && req.method === 'GET') return send(res, 200, await visionStatus())
         if (req.url === '/api/image/texture-process' && req.method === 'POST') {
             const input = await json(req)
@@ -1677,15 +1727,45 @@ http.createServer(async (req, res) => {
             if (!file || typeof file.arrayBuffer !== 'function') return send(res, 400, {error: '缺少图片文件', code: 'MISSING_ASSET_FILE'})
             const contentType = String(file.type || 'application/octet-stream').split(';')[0].toLowerCase()
             if (!contentType.startsWith('image/')) return send(res, 400, {error: '只支持图片文件', code: 'INVALID_ASSET_TYPE'})
-            const buffer = Buffer.from(await file.arrayBuffer())
-            if (buffer.length > MAX_ASSET_BYTES) return send(res, 413, {error: '单张图片不能超过 20 MB', code: 'ASSET_TOO_LARGE', maxBytes: MAX_ASSET_BYTES})
+            let buffer = Buffer.from(await file.arrayBuffer())
+            const originalSize = buffer.length
+            let compressed = false
+            let compressInfo = null
+            // 超过入库上限就自动压缩，不再直接拒绝。
+            if (buffer.length > MAX_ASSET_BYTES) {
+                try {
+                    const result = await compressAssetBuffer(buffer, ASSET_COMPRESS_TARGET_BYTES)
+                    buffer = result.buffer
+                    compressInfo = {quality: result.quality, scale: result.scale, resized: result.resized}
+                    compressed = true
+                } catch (error) {
+                    console.error('[assets/upload] 自动压缩失败:', error.message)
+                }
+            }
+            if (buffer.length > MAX_ASSET_BYTES) {
+                return send(res, 413, {
+                    error: `图片过大（${(originalSize / 1024 / 1024).toFixed(1)} MB），自动压缩后仍超过 ${Math.floor(MAX_ASSET_BYTES / 1024 / 1024)} MB`,
+                    code: 'ASSET_TOO_LARGE',
+                    maxBytes: MAX_ASSET_BYTES,
+                    originalSize
+                })
+            }
             const detectedType = detectedImageContentType(buffer, contentType)
             const hash = crypto.createHash('sha256').update(buffer).digest('hex')
             const filename = `${hash}.${imageExtension(detectedType)}`
             await fs.mkdir(assetsDir, {recursive: true})
             const assetPath = path.join(assetsDir, filename)
             try { await fs.access(assetPath) } catch { await fs.writeFile(assetPath, buffer) }
-            return send(res, 200, {ok: true, assetId: `asset:${hash}`, filename, size: buffer.length, contentType: detectedType})
+            return send(res, 200, {
+                ok: true,
+                assetId: `asset:${hash}`,
+                filename,
+                size: buffer.length,
+                contentType: detectedType,
+                originalSize,
+                compressed,
+                ...(compressInfo ? {compress: compressInfo} : {})
+            })
         }
         if (req.url === '/api/vision/mask' && req.method === 'POST') {
             const input = await json(req)
@@ -1913,7 +1993,9 @@ http.createServer(async (req, res) => {
                 })
                 return res.end(buffer)
             } catch {
-                return send(res, 404, {error: 'generated file not found'})
+                // A transient miss must not be cached by the renderer, or the
+                // result card stays broken until the whole app restarts.
+                return send(res, 404, {error: 'generated file not found'}, {'Cache-Control': 'no-store'})
             }
         }
         if (req.url.startsWith('/api/download') && req.method === 'GET') {
@@ -2069,6 +2151,9 @@ http.createServer(async (req, res) => {
             // UI task types describe the image role, while templates are keyed by
             // the user-facing operation. Normalize them before resolving presets.
             const operation = promptTemplateOperation(input.operation, mode)
+            // Older saved requests can still contain a person-only mask. It
+            // would make the background opaque and prevent scene replacement.
+            const editMask = imageEditMask(operation, input.materials, input.mask)
             const builtIns = await read(files.builtInPromptTemplates, [])
             const requestedVariant = ['single', 'double'].includes(input.builtinVariant) ? input.builtinVariant : ''
             const builtIn = builtIns.find((item) => requestedVariant && item?.variant === requestedVariant && promptTemplateMatches(item, mode, operation, requestedVariant))
@@ -2129,7 +2214,7 @@ http.createServer(async (req, res) => {
                     for (const [imageIndex, image] of referenceImages.entries()) {
                         form.append('image[]', dataUrlFile(image), referenceFilename(image, imageIndex))
                     }
-                    if (input.mask) form.append('mask', dataUrlFile(input.mask, 'person-mask.png'), 'person-mask.png')
+                    if (editMask) form.append('mask', dataUrlFile(editMask, 'person-mask.png'), 'person-mask.png')
                     body = form
                     headers = protocolHeaders(api, route, false)
                 }
@@ -2264,8 +2349,8 @@ http.createServer(async (req, res) => {
                         : openaiImages(result)
                 if (input.debug) {
                     let maskBytes = 0
-                    if (input.mask && isReferenceRequest && route.protocol === 'openai-images') {
-                        try { maskBytes = parseDataUrl(input.mask).buffer.length } catch { maskBytes = 0 }
+                    if (editMask && isReferenceRequest && route.protocol === 'openai-images') {
+                        try { maskBytes = parseDataUrl(editMask).buffer.length } catch { maskBytes = 0 }
                     }
                     debugResponses.push({
                         iteration: index + 1,
@@ -2335,7 +2420,18 @@ http.createServer(async (req, res) => {
                     pending.catch((error) => {
                         console.error('inline image cache failed:', error.message)
                     })
-                    return {...image, url: source, localUrl, sourceUrl: source}
+                    // Warm the grid thumbnail while the batch is still running.
+                    // Result cards otherwise trigger the first decode of a 4K
+                    // PNG exactly when the local service is busiest, which left
+                    // finished cards grey until the whole batch drained.
+                    pending.then(() => getImageThumbnail(localUrl)).catch((error) => {
+                        console.warn('thumbnail warm-up failed:', error.message)
+                    })
+                    // Ship only the local file URL. Echoing the inline data URL
+                    // back pushed tens of megabytes per image through the
+                    // renderer and stalled the result grid while a batch of
+                    // tasks was still running.
+                    return {...image, url: localUrl, localUrl, sourceUrl: localUrl, b64_json: undefined}
                 }
                 cacheImageInBackground(source).catch((error) => {
                     console.error('image cache failed:', error.message)

@@ -1,15 +1,17 @@
 <script setup>
-import {ref, computed, onMounted, onBeforeUnmount, onActivated, markRaw, watch} from 'vue'
+import {ref, computed, onMounted, onBeforeUnmount, onActivated, markRaw, watch, nextTick} from 'vue'
 import {Delete, Upload, Refresh, VideoPlay, Download, SwitchButton} from '@element-plus/icons-vue'
-import {ElMessage} from 'element-plus'
+import {ElImageViewer, ElMessage} from 'element-plus'
 import {X, Plus, ImagePlus, PenLine, FileVideo} from 'lucide-vue-next'
 import {normalizeImageFile, droppedFiles, droppedGeneratedImageUrl, setGeneratedImageDrag} from '../utils/image-drop.mjs'
 import {extractVideoReferences} from '../utils/video-reference.mjs'
 import {imageThumbnailUrl, resultImageSource} from '../utils/image-preview.mjs'
+import {createImageSignature, matchBackgrounds} from '../utils/background-match.mjs'
 import {
   getSettings,
   getModels,
   getPromptTemplates,
+  getBuiltInPromptTemplates,
   getRecords,
   generateImage,
   uploadImageAsset,
@@ -31,6 +33,7 @@ const URL = {
 const models = ref([]);
 const activeApiConfig = ref(null)
 const presets = ref([]);
+const builtInTemplates = ref([])
 const configLoading = ref(false)
 const modelLoadError = ref('')
 const templateLoadError = ref('')
@@ -66,13 +69,15 @@ watch(currentFeature, (feature) => {
   materialsByFeature.value[feature] ??= createMaterialBuckets()
 }, {immediate: true, flush: 'sync'})
 const materials = computed(() => materialsByFeature.value[currentFeature.value])
+const materialsTotal = computed(() => Object.values(materials.value || {}).reduce((total, items) => total + (items?.length || 0), 0))
+const allMaterialsTotal = computed(() => Object.values(materialsByFeature.value).reduce((total, buckets) => total + Object.values(buckets || {}).reduce((count, items) => count + (items?.length || 0), 0), 0))
 const threeViewSource = ref('image')
 const threeViewMaterialKey = computed(() => threeViewSource.value === 'video' ? 'videoReference' : 'reference')
 const videoImporting = ref(false)
 const videoImportProgress = ref(0)
 let videoImportController = null
 const personReplaceVariant = ref('double')
-const visibleImageOperations = ['batch', 'three-view', 'edit', 'clothing-replace', 'hairstyle-replace', 'makeup-replace']
+const visibleImageOperations = ['batch', 'three-view', 'edit', 'clothing-replace', 'hairstyle-replace', 'makeup-replace', 'background']
 const clothingScope = ref('outfit')
 const clothingScopes = {top: '上衣', bottom: '下装', outfit: '整套'}
 const replaceObject = ref('')
@@ -278,6 +283,7 @@ const selected = ref(new Set())
 const cancelledTaskIds = new Set()
 const exporting = ref(false)
 const preparingEdit = ref(false)
+const backgroundImporting = ref(false)
 const textureDialog = ref(false)
 const texturePreview = ref('')
 const texturePreviewing = ref(false)
@@ -310,24 +316,39 @@ const selectedRemovableCount = computed(() => [...selected.value].filter((index)
 const materialPreviewUrls = computed(() => Object.fromEntries(
     Object.entries(materials.value).map(([key, items]) => [key, items.map((item) => item.previewUrl || '')])
 ))
-// Build the viewer list once per results change. Computing this in every
-// result-card template would scan the entire result set for each card.
-const resultPreviewUrls = computed(() => results.value.map(resultImageSource).filter(Boolean))
-const resultPreviewIndexes = computed(() => {
-  const indexes = []
-  let nextIndex = 0
-  results.value.forEach((item, index) => {
-    indexes[index] = item?.url ? nextIndex++ : -1
-  })
-  return indexes
-})
+const resultPreviewItems = computed(() => results.value.map((item, index) => ({index, url: resultImageSource(item)})).filter((item) => item.url))
+const resultPreviewUrls = computed(() => resultPreviewItems.value.map((item) => item.url))
+const resultImageViewer = ref(null)
+const resultViewerOpen = ref(false)
+const resultViewerIndex = ref(0)
+let lastViewerSwitchAt = 0
 
-// Keep the opened viewer independent from cards that are still generating.
-// The shared list used to change as results arrived, which could leave the
-// viewer on a stale index and render a blank/gray image.
-function resultViewerUrls(item) {
-  const url = resultImageSource(item)
-  return url ? [url] : []
+function openResultViewer(index) {
+  const viewerIndex = resultPreviewItems.value.findIndex((item) => item.index === index)
+  if (viewerIndex < 0) return
+  resultViewerIndex.value = viewerIndex
+  resultViewerOpen.value = true
+}
+
+function switchResultViewer(direction) {
+  if (!resultViewerOpen.value || !resultPreviewUrls.value.length) return
+  const nextIndex = Math.min(resultPreviewUrls.value.length - 1, Math.max(0, resultViewerIndex.value + direction))
+  if (nextIndex === resultViewerIndex.value) return
+  resultViewerIndex.value = nextIndex
+  nextTick(() => resultImageViewer.value?.setActiveItem?.(nextIndex))
+}
+
+function onResultViewerKeydown(event) {
+  if (!resultViewerOpen.value) return
+  if (event.key === 'Escape') {
+    resultViewerOpen.value = false
+    return
+  }
+  if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+    if (Date.now() - lastViewerSwitchAt < 150) return
+    event.preventDefault()
+    switchResultViewer(event.key === 'ArrowRight' ? 1 : -1)
+  }
 }
 const progressTotal = computed(() => generationTotal.value || totalExpected.value || 0)
 const progressPercent = computed(() => progressTotal.value ? Math.min(100, Math.round(completedCount.value / progressTotal.value * 100)) : 0)
@@ -343,6 +364,7 @@ const expectedFormula = computed(() => {
   const copies = Math.max(1, Number(count.value || 1))
   if (isTextMode.value) return `1 个文字任务 x ${copies}`
   if (imageOperation.value === 'batch') return `${materials.value.reference.length} 张目标图 x ${copies}`
+  if (imageOperation.value === 'background') return `${materials.value.reference.length} 张目标图 x ${copies}`
   if (imageOperation.value === 'three-view') return `1 组（${materials.value[threeViewMaterialKey.value].length} 张参考图）x ${copies} 张成图`
   return `1 个${operationLabel()}任务 x ${copies}`
 })
@@ -429,6 +451,8 @@ const activeMaterialTypes = computed(() => {
       : item.key === 'reference' && imageOperation.value === 'three-view'
           ? {...item, key: threeViewMaterialKey.value, label: threeViewSource.value === 'video' ? '人物视频' : '人物参考图', step: '必填', required: true,
             hint: threeViewSource.value === 'video' ? '' : '上传同一个人的全身、脸部、侧面或背面照片，所有图片共同生成一张角色设定图。可在提示词中指定某张图用于服装或体型参考。'}
+          : item.key === 'scene' && imageOperation.value === 'background'
+              ? {...item, limit: 30, hint: '可上传一张或多张同一场景下不同角度、不同构图的环境照：系统会按构图方向和色调，自动为每张目标图挑选最匹配的一张做背景替换。'}
           : item)
 })
 
@@ -546,12 +570,37 @@ function clearCurrentImages() {
   if (feature === 'edit') editParent.value = null
 }
 
+function clearCurrentMaterialSection() {
+  const total = materialsTotal.value
+  if (!total) {
+    showMessage('info', '当前板块没有需要清理的素材文件')
+    return
+  }
+  const label = operationLabel()
+  clearCurrentImages()
+  showMessage('success', `已清理「${label}」的 ${total} 个素材文件`)
+}
+
 function clearAllFeatureImages() {
   clearCurrentImages()
   for (const buckets of Object.values(materialsByFeature.value)) {
     for (const items of Object.values(buckets)) items.forEach(revokeMaterialPreview)
   }
   materialsByFeature.value = {[currentFeature.value]: createMaterialBuckets()}
+}
+
+function clearAllImages() {
+  const count = allMaterialsTotal.value
+  videoImportController?.abort()
+  for (const buckets of Object.values(materialsByFeature.value)) {
+    for (const items of Object.values(buckets || {})) items.forEach(revokeMaterialPreview)
+  }
+  materialsByFeature.value = {}
+  materialsByFeature.value[currentFeature.value] = createMaterialBuckets()
+  for (const input of materialUploadRoot.value?.querySelectorAll('input[type="file"]') || []) input.value = ''
+  editParent.value = null
+  if (count) showMessage('success', `已清理全部板块的 ${count} 个素材文件`)
+  else showMessage('info', '当前没有需要清理的素材文件')
 }
 
 function resultMemoryItem(item) {
@@ -816,14 +865,16 @@ async function buildLabeledReferences(task, materialSet = materials.value) {
   const materialOrder = task.materialKeys || ['person', 'reference', 'batchReference', 'pose', 'prop', 'scene', 'editReference']
   for (const key of materialOrder) {
     const isThreeView = task.type === 'three-view'
-    const items = key === 'reference' && task.item && !isThreeView ? [task.item] : materialSet[key]
+    const items = key === 'reference' && task.item && !isThreeView
+      ? [task.item]
+      : task.materialPicks?.[key] || materialSet[key] || []
     for (const [index, item] of items.entries()) {
       const file = rawFile(item)
       if (!file) continue
       labeled.push({
         role: isThreeView ? 'person_reference' : referenceRole(key),
         type: isThreeView ? '人物参考' : materialLabels[key],
-        promptLabel: isThreeView ? `人物参考图${index + 1}` : referencePromptLabel(key),
+        promptLabel: isThreeView ? `人物参考图${index + 1}` : task.type === 'background' && key === 'scene' ? '背景参考图' : referencePromptLabel(key),
         videoReferenceRank: isThreeView && key === 'videoReference' ? item.videoReferenceRank : undefined,
         primary: !isThreeView && item === task?.item,
         data: await fileToAssetReference(file)
@@ -1042,15 +1093,35 @@ async function addFiles(key, upload, feature = currentFeature.value, buckets = m
     return;
   }
   if (buckets[key].some((item) => item.name === preparedFile.name && item.size === preparedFile.size)) return;
+  const signature = ['scene', 'reference'].includes(key) ? await createImageSignature(preparedFile) : null
+  if (materialsByFeature.value[feature] !== buckets) return
   buckets[key].push(markRaw({
     file: preparedFile,
     name: preparedFile.name,
     size: preparedFile.size,
     width,
     height,
+    ...(signature ? {signature} : {}),
     previewUrl: URL.createObjectURL(preparedFile)
   }))
 }
+
+// IndexedDB restores files without their lightweight matching signatures.
+watch(() => [imageOperation.value, materials.value.scene.length, materials.value.reference.length], async () => {
+  if (imageOperation.value !== 'background') return
+  const buckets = materials.value
+  for (const key of ['scene', 'reference']) {
+    for (const [index, item] of buckets[key].entries()) {
+      if (item.signature) continue
+      const file = rawFile(item)
+      if (!file) continue
+      const signature = await createImageSignature(file)
+      if (signature && materialsByFeature.value.background === buckets && buckets[key][index] === item) {
+        buckets[key][index] = markRaw({...item, signature})
+      }
+    }
+  }
+}, {immediate: true})
 
 function removeFile(key, index) {
   revokeMaterialPreview(materials.value[key]?.[index])
@@ -1076,9 +1147,9 @@ async function refresh(options = {}) {
     activeWorkspaceName.value = activeApi?.name || ''
     const modelsRequest = getModels()
     const templatesVersion = ++templateRequestId
-    const templatesRequest = getPromptTemplates()
-    const userTemplatesResult = await Promise.allSettled([templatesRequest]).then(([result]) => result)
+    const [userTemplatesResult, builtInResult] = await Promise.allSettled([getPromptTemplates(), getBuiltInPromptTemplates()])
     if (requestId !== configRequestId) return
+    if (builtInResult.status === 'fulfilled') builtInTemplates.value = builtInResult.value || []
     if (userTemplatesResult.status === 'fulfilled' && templatesVersion === templateRequestId) {
       presets.value = userTemplatesResult.value || []
     } else if (templatesVersion === templateRequestId) {
@@ -1161,9 +1232,11 @@ async function refreshPromptTemplates() {
   const requestId = ++templateRequestId
   templateLoadError.value = ''
   try {
-    const nextTemplates = await getPromptTemplates()
+    const [userResult, builtInResult] = await Promise.allSettled([getPromptTemplates(), getBuiltInPromptTemplates()])
     if (requestId !== templateRequestId) return
-    presets.value = nextTemplates || []
+    if (builtInResult.status === 'fulfilled') builtInTemplates.value = builtInResult.value || []
+    if (userResult.status === 'rejected') throw userResult.reason
+    presets.value = userResult.value || []
     normalizeConfigSelection()
   } catch (error) {
     if (requestId !== templateRequestId) return
@@ -1229,7 +1302,21 @@ function buildImageTasks() {
     return [{item: target, type: 'fusion', label: '多图融合', materialKeys: ['reference', 'person', 'scene', 'prop']}]
   }
   if (imageOperation.value === 'background') {
-    return [{item: target, type: 'background', label: '背景替换', materialKeys: ['reference', 'scene']}]
+    const targets = materials.value.reference
+    const backgrounds = materials.value.scene
+    const matches = matchBackgrounds(targets, backgrounds)
+    return targets.map((item, index) => {
+      const background = matches.get(item)
+      const backgroundIndex = background ? backgrounds.indexOf(background) + 1 : 0
+      return {
+        item,
+        type: 'background',
+        operation: 'background',
+        label: backgrounds.length > 1 && backgroundIndex ? `背景替换 ${index + 1} · 背景图 ${backgroundIndex}` : `背景替换 ${index + 1}`,
+        materialKeys: ['reference', 'scene'],
+        materialPicks: background ? {scene: [background]} : undefined
+      }
+    })
   }
   if (imageOperation.value === 'edit') {
     return [{item: target, type: 'local-edit', label: '局部继续编辑', materialKeys: ['reference', 'editReference']}]
@@ -1266,7 +1353,12 @@ function imageValidationError() {
   return ''
 }
 
-function buildMaterialPrompt(labeled, taskType = 'text', taskLabel = '提示词变化', replaceObjectText = '', configuredRule = '', scope = 'outfit') {
+function materialPromptRule(material) {
+  const template = builtInTemplates.value.find((item) => item.material === material && ['batch', 'all', ''].includes(item.operation || ''))
+  return String(template?.systemPrompt || '').trim()
+}
+
+function buildMaterialPrompt(labeled, taskType = 'text', taskLabel = '提示词变化', replaceObjectText = '', configuredRule = '', scope = 'outfit', includeSceneRule = true) {
   if (!labeled.length) return '';
   if (taskType === 'clothing-replace') {
     const scopeRule = scope === 'top' ? '只替换上衣，保留原图下装。' : scope === 'bottom' ? '只替换下装，保留原图上衣。' : '替换参考图中可见的上衣、下装或连衣裙；参考图未提供的服装部分保持原样。'
@@ -1286,9 +1378,12 @@ function buildMaterialPrompt(labeled, taskType = 'text', taskLabel = '提示词�
     ].filter(Boolean).join('\n\n')
   }
   const primary = labeled.find((item) => item.primary)
-  const manifest = ['提示词可直接使用“人物参考图”“目标图/构图图”“道具图”“场景参考图”“动作参考图”“画面参考图”或“编辑参考图”指代对应类别，无需使用图片序号。', '本次请求会同时发送以上全部参考图；本次主参考图是“' + (primary?.promptLabel || '无') + '”。当规则提到目标图、构图图或主参考图时，均以该图片为准。', ...labeled.map((item, index) => `图片${index + 1}：${item.promptLabel}${item.primary ? '（本次主参考图）' : ''}（${item.role}）`)].join('\n');
+  const personMappingRule = labeled.filter((item) => item.role === 'person_reference').length > 1
+      ? '默认对应关系（用户在补充提示词中另有说明时以用户说明为准）：按性别与角色对应——每张人物参考图对应目标图中与它性别、角色一致的那个人物，女性参考图换目标图中的女性、男性参考图换男性，不按左右位置硬套；两张参考图性别相同或无法区分时，再按目标图从左到右、从前到后与人物参考图 1、人物参考图 2 顺序对应。两张人物参考图必须分别用在两个不同的人身上，两个人必须都完成身份、发型与服装替换，只替换其中一个人视为失败。'
+      : ''
+  const manifest = ['提示词可直接使用“人物参考图”“目标图/构图图”“道具图”“场景参考图”“动作参考图”“画面参考图”或“编辑参考图”指代对应类别，无需使用图片序号。', '本次请求会同时发送以上全部参考图；本次主参考图是“' + (primary?.promptLabel || '无') + '”。当规则提到目标图、构图图或主参考图时，均以该图片为准。', ...labeled.map((item, index) => `图片${index + 1}：${item.promptLabel}${item.primary ? '（本次主参考图）' : ''}（${item.role}）`), personMappingRule].filter(Boolean).join('\n');
   const defaultRule = taskType === 'reference'
-      ? '以主目标图为画面基础，保持其构图、动作、位置、遮挡和透视。人物参考图只提供人物身份与外观；如上传背景参考图，则将其环境、场景氛围和背景元素融入主目标图；如上传道具图，则将其作为画面中人物自然使用或呈现的道具。未上传的人物、背景或道具素材不作替换要求。'
+      ? '以主目标图为画面基础，保持其构图、动作、位置、遮挡和透视。上传人物参考图时，它只提供人物身份与外观；未上传人物参考图时，不替换任何人物身份，目标图中的全部人物原样保留。上传背景参考图时，用它的环境整幅替换主目标图的背景，并把它画面中的人物全部清除，不得带入结果。上传道具图时，把它作为画面中人物自然使用或呈现的道具。未上传的人物、背景或道具素材不作替换要求。'
       : taskType === 'pose'
           ? '保持人物参考中的同一人物，采用最后一张动作参考的姿势和身体朝向；不得带入动作参考人物的身份、脸部和背景。'
           : taskType === 'prop'
@@ -1304,11 +1399,11 @@ function buildMaterialPrompt(labeled, taskType = 'text', taskLabel = '提示词�
                               : '只根据补充提示词为人物参考中的同一人物创建一个新变化。';
   const batchMaterialRule = taskType === 'reference' ? [
     labeled.some((item) => item.role === 'pose_reference')
-        ? '动作模仿图是本次动作的唯一优先来源：严格模仿其中人物的姿势、肢体关系和身体朝向，但不得带入动作图人物的身份、脸部、服装、道具或背景；此时不要以目标图中的原动作覆盖动作模仿图。'
+        ? materialPromptRule('pose')
         : '未上传动作模仿图时，保持并参考目标图中的原有动作、肢体关系和身体朝向。',
-    labeled.some((item) => item.role === 'scene_reference') && '背景参考图是必须使用的视觉来源：将背景图中可辨识的场景、地点、室内外环境、主要背景物体、色调和氛围融入主目标图背景，不得忽略或以无关背景替代。',
-    labeled.some((item) => item.role === 'prop_reference') && '道具图是必须使用的视觉来源：在主目标图中清晰呈现道具图里的主要道具，保留其可辨识的外形、材质、颜色和关键细节，并使其与人物或画面自然接触；不得省略、替换为其他道具或只保留相似概念。',
-    labeled.some((item) => item.role === 'visual_reference') && '画面参考图不是另一张待处理的目标图，也不得整张覆盖或合成到当前目标图。它只提供用户在补充提示词中明确指定的视觉特征，例如色调、光线、氛围、道具或材质。每一张目标图都应独立应用这些明确要求，同时保持各自未指定的主体、构图、位置、透视和内容不变；未明确要求时不得擅自借用参考图的其他主体或背景。'
+    labeled.some((item) => item.role === 'scene_reference') && includeSceneRule && materialPromptRule('scene'),
+    labeled.some((item) => item.role === 'prop_reference') && materialPromptRule('prop'),
+    labeled.some((item) => item.role === 'visual_reference') && materialPromptRule('visual')
   ].filter(Boolean).join('\n') : '';
   const editReferenceRule = taskType === 'local-edit' && labeled.some((item) => item.role === 'edit_reference')
       ? '编辑参考图不是第二张待编辑画布，也不得整张覆盖或合成到主参考图。它只提供用户在补充提示词中明确指定的内容或视觉特征，例如某个道具、花材、材质、色调、光线或氛围。只借用与明确要求有关的特征；未明确要求时不得使用它。若用户明确要求色调或光线调整，可在完成该要求所需范围内调整全图，同时保持主体、构图、空间关系和未指定内容不变。'
@@ -1397,9 +1492,14 @@ async function runGeneration(work) {
       const labeled = await buildLabeledReferences(task, work.materialSnapshot)
       let mask = ''
       let maskStatus = 'not-requested'
-      // Generate one mask per target task, then reuse it for all copies. This
-      // avoids running local vision repeatedly when the user requests N copies.
-      if (task.type === 'reference' && !isGeminiRequest) {
+      // The person mask locks the background and only permits editing people.
+      // Use it for person replacement without a scene reference, never for
+      // background replacement or a batch task that also changes the scene.
+      const needsPersonMask = task.type === 'reference'
+          && labeled.some((item) => item.role === 'person_reference')
+          && !labeled.some((item) => item.role === 'scene_reference')
+      // Generate one mask per target task, then reuse it for all copies.
+      if (needsPersonMask && !isGeminiRequest) {
         const target = labeled.find((item) => item.role === 'target_reference')
         if (target?.data) {
           try {
@@ -1416,7 +1516,7 @@ async function runGeneration(work) {
         task,
         labeled,
         mask,
-        maskStatus: task.type === 'reference' && isGeminiRequest ? 'skipped-gemini' : maskStatus,
+        maskStatus: needsPersonMask && isGeminiRequest ? 'skipped-gemini' : maskStatus,
         requestSize: await getRequestSize(task, work.requestConfig),
         aspectRatio: await resolveGeminiAspectRatio(work.requestConfig.aspectRatio, task.item)
       }
@@ -1455,7 +1555,7 @@ async function runGeneration(work) {
         model: work.requestConfig.model,
         modelConfigId: work.requestConfig.modelConfigId,
         protocol: work.requestConfig.protocol,
-        prompt: buildMaterialPrompt(labeled, task.type, task.label, work.requestConfig.replaceObject, selectedTemplate?.systemPrompt || '', task.clothingScope),
+        prompt: buildMaterialPrompt(labeled, task.type, task.label, work.requestConfig.replaceObject, selectedTemplate?.systemPrompt || '', task.clothingScope, task.operation !== 'background'),
         extraPrompt: work.requestConfig.prompt,
         presetId: work.requestConfig.presetId,
         builtinVariant: work.requestConfig.builtinVariant,
@@ -1473,7 +1573,7 @@ async function runGeneration(work) {
         taskId,
         parentResultId: task.type === 'local-edit' ? editParent.value?.id || null : null,
         version: task.type === 'local-edit' ? Number(editParent.value?.version || 0) + 1 : 1,
-        operation: task.type,
+        operation: task.operation || task.type,
         debug: false
       }
       const startedIndex = currentResultIndex()
@@ -1667,6 +1767,43 @@ async function continueEdit() {
     error.value = formatApiError(e, '无法读取已选样片')
   } finally {
     preparingEdit.value = false
+  }
+}
+
+async function importSelectedToBackground() {
+  const indexes = [...selected.value].sort((a, b) => a - b).filter((index) => results.value[index]?.url)
+  if (!indexes.length || running.value || backgroundImporting.value) return
+  if (indexes.length > 30) {
+    error.value = '背景替换最多导入 30 张目标图'
+    return
+  }
+  backgroundImporting.value = true
+  try {
+    mode.value = 'image'
+    imageOperation.value = 'background'
+    const buckets = materials.value
+    buckets.reference.forEach(revokeMaterialPreview)
+    buckets.reference = []
+    let imported = 0
+    for (const index of indexes) {
+      const item = results.value[index]
+      const source = resultImageSource(item)
+      const response = await fetch(source, {credentials: 'omit', cache: 'no-store'})
+      if (!response.ok) throw new Error(`无法读取第 ${index + 1} 张样片（HTTP ${response.status}）`)
+      const blob = await response.blob()
+      if (!blob.type.startsWith('image/')) throw new Error(`第 ${index + 1} 张样片不是图片`)
+      const extension = blob.type.split('/')[1]?.replace('jpeg', 'jpg') || 'png'
+      await addFiles('reference', {raw: new File([blob], `background-target-${Date.now()}-${index + 1}.${extension}`, {type: blob.type})}, 'background', buckets)
+      if (buckets.reference.length === imported) throw new Error(error.value || '样片导入失败')
+      imported += 1
+    }
+    selected.value = new Set()
+    prompt.value = ''
+    showMessage('success', `已导入 ${imported} 张样片作为背景替换的目标图，请在本板块添加背景参考图后生成`)
+  } catch (exception) {
+    error.value = formatApiError(exception, '导入样片到背景替换失败')
+  } finally {
+    backgroundImporting.value = false
   }
 }
 
@@ -1942,6 +2079,7 @@ function onPromptTemplatesChanged() {
 }
 
 function onKeydown(event) {
+  if (resultViewerOpen.value) return
   const tag = event.target?.tagName?.toLowerCase();
   if (event.key === 'Enter' && (event.ctrlKey || event.metaKey || tag !== 'textarea')) {
     if (tag === 'input' && !event.ctrlKey && !event.metaKey) return;
@@ -2007,6 +2145,7 @@ function startRailResize(event) {
 }
 
 onMounted(() => window.addEventListener('keydown', onKeydown))
+onMounted(() => window.addEventListener('keydown', onResultViewerKeydown))
 onMounted(() => window.addEventListener('sample-factory-active-api-changed', onActiveApiChanged))
 // API management can update the active profile's protocol/model routes
 // without changing its id. Refresh the workspace for that case as well.
@@ -2041,6 +2180,7 @@ onBeforeUnmount(() => {
   textureAbortController?.abort()
   clearTextureUploads()
   window.removeEventListener('keydown', onKeydown)
+  window.removeEventListener('keydown', onResultViewerKeydown)
   window.removeEventListener('sample-factory-active-api-changed', onActiveApiChanged)
   window.removeEventListener('sample-factory-settings-changed', onActiveApiChanged)
   window.removeEventListener('sample-factory-prompt-templates-changed', onPromptTemplatesChanged)
@@ -2078,7 +2218,16 @@ onBeforeUnmount(() => {
               }}</p>
             <div v-if="isTextMode" class="text-mode-empty">在下方提示词区域描述画面后即可开始生成。</div>
             <div v-if="!isTextMode" :key="currentFeature" ref="materialUploadRoot" class="assets">
-              <el-button class="rail-new-task" native-type="button" :icon="Delete" @click="clearCurrentImages">清理图片</el-button>
+              <section class="material-toolbar" aria-label="素材文件管理">
+                <div class="material-toolbar-summary">
+                  <b>{{ operationLabel() }}</b>
+                  <span>本板块 {{ materialsTotal }} 个文件 · 全部板块 {{ allMaterialsTotal }} 个文件</span>
+                </div>
+                <div class="material-toolbar-actions">
+                  <el-button size="small" @click="clearCurrentMaterialSection" :disabled="!materialsTotal || running">清空本板块</el-button>
+                  <el-button size="small" type="danger" plain @click="clearAllImages" :disabled="!allMaterialsTotal || running">清空全部板块</el-button>
+                </div>
+              </section>
               <el-form-item label="处理方式" class="image-operation">
                 <el-radio-group class="image-operation-options" :model-value="imageOperation"
                                 @change="setImageOperation">
@@ -2087,14 +2236,14 @@ onBeforeUnmount(() => {
                   <el-radio-button label="clothing-replace">服装替换</el-radio-button>
                   <el-radio-button label="hairstyle-replace">发型替换</el-radio-button>
                   <el-radio-button label="makeup-replace">妆造替换</el-radio-button>
+                  <el-radio-button label="background">背景替换</el-radio-button>
                   <!--                  <el-radio-button label="fusion">多图融合</el-radio-button>-->
-                  <!--                  <el-radio-button label="background">背景替换</el-radio-button>-->
                   <!--                  <el-radio-button label="prop">道具替换</el-radio-button>-->
                   <el-radio-button label="edit">局部继续编辑</el-radio-button>
                 </el-radio-group>
               </el-form-item>
               <p v-if="!['clothing-replace', 'hairstyle-replace', 'makeup-replace'].includes(imageOperation)" class="operation-hint">{{
-                  imageOperation === 'batch' ? '每张目标图独立生成。可选上传一张画面参考图，并在提示词中说明要统一借用的色调、道具或氛围；动作模仿图优先决定动作，人物参考固定身份。' : imageOperation === 'three-view' ? '多张人物参考融合为一张：左侧全身正面、侧面、背面，右侧头部正面、45度、侧面、后脑及表情特写。自动比例为横向 3:2。' : imageOperation === 'fusion' ? '人物、主目标、背景和道具共同组成一个融合任务。' : imageOperation === 'background' ? '只使用主目标图和背景参考图，保留前景主体。' : imageOperation === 'prop' ? '只使用主目标图和道具参考图，指定画面中要替换的对象。' : '从结果中选择一张样片作为基础图；可选上传一张编辑参考图，并在提示词中说明要借用的道具、材质或色调。'
+                  imageOperation === 'batch' ? '每张目标图独立生成。可选上传一张画面参考图，并在提示词中说明要统一借用的色调、道具或氛围；动作模仿图优先决定动作，人物参考固定身份。' : imageOperation === 'three-view' ? '多张人物参考融合为一张：左侧全身正面、侧面、背面，右侧头部正面、45度、侧面、后脑及表情特写。自动比例为横向 3:2。' : imageOperation === 'fusion' ? '人物、主目标、背景和道具共同组成一个融合任务。' : imageOperation === 'background' ? '为每张目标图替换背景：可上传多张目标图 + 一张或多张同一场景的环境照，系统会按构图与色调自动为每张目标图挑最匹配的背景，逐张生成；提示词用「背景替换专属规则」，可在内置提示词页直接修改。' : imageOperation === 'prop' ? '只使用主目标图和道具参考图，指定画面中要替换的对象。' : '从结果中选择一张样片作为基础图；可选上传一张编辑参考图，并在提示词中说明要借用的道具、材质或色调。'
                 }}</p>
               <el-form-item v-if="imageOperation === 'clothing-replace'" label="替换范围" class="person-variant-control">
                 <el-radio-group v-model="clothingScope" class="image-operation-options" aria-label="替换范围">
@@ -2295,49 +2444,53 @@ onBeforeUnmount(() => {
                      :disabled="selected.size !== 1 || running || preparingEdit"
                      @click="continueEdit">{{ preparingEdit ? '准备编辑图' : '继续编辑' }}
           </el-button>
+          <el-button :icon="ImagePlus" :loading="backgroundImporting"
+                     :disabled="!selected.size || running || backgroundImporting"
+                     @click="importSelectedToBackground">导入到背景替换
+          </el-button>
         </div>
       </div>
       <div v-if="!results.length" class="empty">暂无生成结果</div>
       <div v-else class="gallery">
         <div v-for="(item,index) in results" :key="item.id || index" class="result-card"
-             :class="{ selected: selected.has(index), 'is-draggable': !!item.url }"
-             :draggable="!!item.url" @dragstart="startResultDrag($event, item)">
+             :class="{ selected: selected.has(index), 'is-draggable': !!item.url, 'is-openable': !!resultImageSource(item) }"
+             :draggable="!!item.url" :tabindex="resultImageSource(item) ? 0 : undefined"
+             @dragstart="startResultDrag($event, item)" @click="openResultViewer(index)"
+             @keydown.enter.self.prevent="openResultViewer(index)" @keydown.space.self.prevent="openResultViewer(index)">
           <div v-if="item.loading && !item.url" class="loading-placeholder">
             <span>{{
                 item.status === 'preparing' ? '正在准备素材...' : item.status === 'generating' ? '正在加载图片...' : '等待生成'
               }}</span>
             <b>样片 {{ index + 1 }}</b>
 
-            <el-button v-if="item.taskId" size="small" :icon="SwitchButton" @click="stopOne(index)">停止</el-button>
+            <el-button v-if="item.taskId" size="small" :icon="SwitchButton" @click.stop="stopOne(index)">停止</el-button>
           </div>
           <template v-else-if="item.url">
             <el-image :src="item.thumbnailFailed ? resultImageSource(item) : imageThumbnailUrl(resultImageSource(item))" fit="cover" lazy decoding="async"
                       :class="{ 'is-image-loading': item.imageLoading }"
                       @load="item.imageLoading = false"
                       @error="item.imageLoading = false; item.thumbnailFailed = true"
-                      preview-teleported
-                      hide-on-click-modal
-                      :preview-src-list="resultViewerUrls(item)"/>
+                      />
             <span class="result-label">{{ item.label }} · V{{ item.version || 1 }}<small
                 v-if="item.parentResultId">续作</small></span>
-            <el-button v-if="item.task" size="small" :icon="Refresh" @click="retry(index)">再次生成</el-button>
+            <el-button v-if="item.task" size="small" :icon="Refresh" @click.stop="retry(index)">再次生成</el-button>
           </template>
           <div v-else-if="item.status === 'stopped'" class="result-stopped">
             <strong>已停止生成</strong>
-            <el-button v-if="item.task || item.requestSnapshot" size="small" :icon="Refresh" @click="retry(index)">
+            <el-button v-if="item.task || item.requestSnapshot" size="small" :icon="Refresh" @click.stop="retry(index)">
               重试
             </el-button>
           </div>
           <div v-else-if="item.error" class="result-error" :class="{ 'result-uncertain': item.uncertain }">
             <strong>{{ item.uncertain ? '结果待确认' : '生成失败' }}</strong>
             <span>{{ item.error }}</span>
-            <el-button v-if="item.task && !item.uncertain" size="small" :icon="Refresh" @click="retry(index)">重试
+            <el-button v-if="item.task && !item.uncertain" size="small" :icon="Refresh" @click.stop="retry(index)">重试
             </el-button>
           </div>
           <div v-else class="result-error">
             <strong>未生成图片</strong>
             <span>接口没有返回可预览的图片</span>
-            <el-button v-if="item.task" size="small" :icon="Refresh" @click="retry(index)">重试</el-button>
+            <el-button v-if="item.task" size="small" :icon="Refresh" @click.stop="retry(index)">重试</el-button>
           </div>
           <span v-if="item.url && item.imageLoading" class="image-loading-indicator">正在加载图片...</span>
           <el-checkbox :model-value="selected.has(index)" class="result-check"
@@ -2345,6 +2498,10 @@ onBeforeUnmount(() => {
         </div>
       </div>
     </section>
+    <ElImageViewer v-if="resultViewerOpen" ref="resultImageViewer" :url-list="resultPreviewUrls"
+                   :initial-index="resultViewerIndex" :z-index="3000" teleported hide-on-click-modal
+                   @close="resultViewerOpen = false"
+                   @switch="(index) => { lastViewerSwitchAt = Date.now(); resultViewerIndex = index }"/>
     <el-dialog v-model="textureDialog" title="去 AI 识别 · 无损图片处理" width="780px" class="texture-dialog">
       <div class="texture-disclaimer">清理图片元数据，保留原始尺寸，无损 PNG 输出，不添加颗粒。</div>
       <div v-if="textureMetadata" class="texture-metadata-summary">
@@ -2390,6 +2547,24 @@ onBeforeUnmount(() => {
   font-size: 11px;
   line-height: 15px;
   pointer-events: none;
+}
+
+.material-toolbar {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+  padding: 9px 11px;
+  background: #f4f7f3;
+  border: 1px solid #d8e0d7;
+  border-radius: 5px;
+}
+.material-toolbar-summary { display: grid; gap: 2px; min-width: 0; }
+.material-toolbar-summary b { color: #24302c; font-size: 12px; }
+.material-toolbar-summary span { color: #6d7a73; font-size: 10px; line-height: 1.4; }
+.material-toolbar-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.material-toolbar-actions :deep(.el-button) { width: 100%; margin: 0; }
+@media (max-width: 700px) {
+  .material-toolbar-actions { grid-template-columns: 1fr; }
 }
 
 .texture-disclaimer { margin-bottom: 16px; padding: 10px 12px; background: #fff7e8; border-left: 3px solid #c88432; color: #765b36; font-size: 12px; line-height: 1.5; }
